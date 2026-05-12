@@ -188,6 +188,116 @@ var subtotal = payload.price * payload.qty
     expect(run(`---\npayload..missing`, { a: 1, b: { c: 2 } }).result).toBe(null);
   });
 
+  // ─── 5.2 Literal Pattern Matching ────────────────────────────────────
+  test("match returns the first matching case's result", () => {
+    const src = `---\npayload.action match {
+      case "buy"  -> "Buy"
+      case "sell" -> "Sell"
+      else        -> "Other"
+    }`;
+    expect(run(src, { action: "buy" }).result).toBe("Buy");
+    expect(run(src, { action: "sell" }).result).toBe("Sell");
+    expect(run(src, { action: "hold" }).result).toBe("Other");
+  });
+  test("match matches across types (number, bool, string)", () => {
+    const src = `---\npayload match {
+      case 1     -> "Number one"
+      case "hi"  -> "Greeting"
+      case true  -> "Yes"
+      else       -> "?"
+    }`;
+    expect(run(src, 1).result).toBe("Number one");
+    expect(run(src, "hi").result).toBe("Greeting");
+    expect(run(src, true).result).toBe("Yes");
+    expect(run(src, 99).result).toBe("?");
+  });
+  test("match `case -> …` (no literal) acts as a fallback like `else`", () => {
+    const src = `---\npayload match { case "x" -> "X" case -> "default" }`;
+    expect(run(src, "y").result).toBe("default");
+  });
+  test("match with no fallback and no matching case returns null", () => {
+    const src = `---\npayload match { case 1 -> "one" }`;
+    expect(run(src, 99).result).toBe(null);
+  });
+
+  // ─── 6.4 Infix notation ──────────────────────────────────────────────
+  test("infix call: `a fn b` is the same as `fn(a, b)`", () => {
+    const src = `fun add(a, b) = a + b\n---\n{ prefix: add(2, 3), infix: 2 add 3 }`;
+    const { result } = run(src, {});
+    expect(result).toEqual({ prefix: 5, infix: 5 });
+  });
+  test("infix chains left-associatively", () => {
+    // `10 applyTo ((x) -> x + 1) applyTo ((x) -> x * 2)` = ((10+1)*2) = 22
+    const src = `fun applyTo(arg, f) = f(arg)\n---\n10 applyTo ((x) -> x + 1) applyTo ((x) -> x * 2)`;
+    expect(run(src, {}).result).toBe(22);
+  });
+
+  // ─── 6.5 $ / $$ / $$$ implicit params ────────────────────────────────
+  test("`$` inside a call arg auto-wraps as a one-param lambda", () => {
+    const src = `fun applyTo(arg, f) = f(arg)\n---\n10 applyTo ($ * 2)`;
+    expect(run(src, {}).result).toBe(20);
+  });
+  test("`$` and `$$` together auto-wrap as a two-param lambda", () => {
+    const src = `fun combine(a, b, f) = f(a, b)\n---\ncombine(2, 3, $ + $$)`;
+    expect(run(src, {}).result).toBe(5);
+  });
+  test("`$.field` works with auto-wrap (selector inside implicit lambda)", () => {
+    const src = `fun applyTo(arg, f) = f(arg)\n---\napplyTo(payload, $.name)`;
+    expect(run(src, { name: "Alice" }).result).toBe("Alice");
+  });
+
+  // ─── 5.1 If / Else ───────────────────────────────────────────────────
+  test("if/else returns the then-branch when condition is truthy", () => {
+    expect(run(`---\nif (true) "yes" else "no"`, {}).result).toBe("yes");
+    expect(run(`---\nif (1 < 2) "yes" else "no"`, {}).result).toBe("yes");
+  });
+  test("if/else returns the else-branch when condition is falsy", () => {
+    expect(run(`---\nif (false) "yes" else "no"`, {}).result).toBe("no");
+  });
+  test("if/else only evaluates the taken branch (lazy)", () => {
+    // The unused branch would blow up with a missing-identifier error if it
+    // were evaluated. So a passing run here proves laziness.
+    expect(run(`---\nif (true) 1 else nope`, {}).result).toBe(1);
+    expect(run(`---\nif (false) nope else 2`, {}).result).toBe(2);
+  });
+  test("chained if/else works as expected", () => {
+    const src = `---\nif (payload.x > 10) "big" else if (payload.x > 0) "small" else "non-positive"`;
+    expect(run(src, { x: 100 }).result).toBe("big");
+    expect(run(src, { x: 5 }).result).toBe("small");
+    expect(run(src, { x: 0 }).result).toBe("non-positive");
+  });
+
+  // ─── 6.1 Named functions ─────────────────────────────────────────────
+  test("named function declared in header is callable from the body", () => {
+    const src = `fun add(x, y) = x + y\n---\nadd(2, 3)`;
+    expect(run(src, {}).result).toBe(5);
+  });
+  test("named functions support recursion", () => {
+    const src = `fun fact(n) = if (n <= 1) 1 else n * fact(n - 1)\n---\nfact(5)`;
+    expect(run(src, {}).result).toBe(120);
+  });
+
+  // ─── 6.2 Lambdas + closures ──────────────────────────────────────────
+  test("lambdas can be assigned to a var and called", () => {
+    const src = `var inc = (x) -> x + 1\n---\ninc(41)`;
+    expect(run(src, {}).result).toBe(42);
+  });
+  test("lambdas capture surrounding scope (closures)", () => {
+    // `inc` captures `n` from the outer scope; calling it later still sees it.
+    const src = `var n = 10\nvar inc = (x) -> x + n\n---\ninc(5)`;
+    expect(run(src, {}).result).toBe(15);
+  });
+  test("zero-arg lambda", () => {
+    const src = `var greet = () -> "Hello"\n---\ngreet()`;
+    expect(run(src, {}).result).toBe("Hello");
+  });
+
+  // ─── 6.3 Functions as values ─────────────────────────────────────────
+  test("functions are first-class values (can be passed via vars)", () => {
+    const src = `var inc = (x) -> x + 1\nvar twice = (f, x) -> f(f(x))\n---\ntwice(inc, 10)`;
+    expect(run(src, {}).result).toBe(12);
+  });
+
   test("`<=` and `>=` work end-to-end", () => {
     expect(run(`---\npayload.age >= 18`, { age: 21 }).result).toBe(true);
     expect(run(`---\npayload.age >= 18`, { age: 18 }).result).toBe(true);

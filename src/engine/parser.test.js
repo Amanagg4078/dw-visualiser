@@ -164,6 +164,102 @@ describe("parser", () => {
     expect(ast.body.right.name).toBe("b");
   });
 
+  test("parses if/else as an expression", () => {
+    const ast = parseSrc(`---\nif (a) 1 else 2`);
+    expect(ast.body.kind).toBe("IfElse");
+    expect(ast.body.cond.kind).toBe("Ident");
+    expect(ast.body.then.value).toBe(1);
+    expect(ast.body.else.value).toBe(2);
+  });
+
+  test("parses chained if / else if / else", () => {
+    const ast = parseSrc(`---\nif (a) 1 else if (b) 2 else 3`);
+    expect(ast.body.kind).toBe("IfElse");
+    expect(ast.body.else.kind).toBe("IfElse");
+    expect(ast.body.else.else.value).toBe(3);
+  });
+
+  test("parses `fun` declarations in the header", () => {
+    const ast = parseSrc(`fun add(x, y) = x + y\n---\nadd(1, 2)`);
+    expect(ast.header.vars).toHaveLength(1);
+    expect(ast.header.vars[0].name).toBe("add");
+    expect(ast.header.vars[0].expr.kind).toBe("Lambda");
+    expect(ast.header.vars[0].expr.params).toEqual(["x", "y"]);
+  });
+
+  test("parses lambdas in expression position", () => {
+    const ast = parseSrc(`---\n(x) -> x + 1`);
+    expect(ast.body.kind).toBe("Lambda");
+    expect(ast.body.params).toEqual(["x"]);
+  });
+
+  test("parses zero-arg lambdas `() -> expr`", () => {
+    const ast = parseSrc(`---\n() -> 42`);
+    expect(ast.body.kind).toBe("Lambda");
+    expect(ast.body.params).toEqual([]);
+  });
+
+  test("still parses `(x)` as a parenthesised expression when no arrow follows", () => {
+    const ast = parseSrc(`---\n(1 + 2) * 3`);
+    expect(ast.body.kind).toBe("BinOp");
+    expect(ast.body.op).toBe("*");
+  });
+
+  test("parses a literal-pattern match expression", () => {
+    const ast = parseSrc(`---\npayload match { case 1 -> "one" case 2 -> "two" else -> "other" }`);
+    expect(ast.body.kind).toBe("MatchExpr");
+    expect(ast.body.cases).toHaveLength(2);
+    expect(ast.body.cases[0].literal.value).toBe(1);
+    expect(ast.body.cases[0].result.value).toBe("one");
+    expect(ast.body.fallback.value).toBe("other");
+  });
+
+  test("match accepts `case ->` form for the fallback (no `else`)", () => {
+    const ast = parseSrc(`---\npayload match { case 1 -> "one" case -> "fallback" }`);
+    expect(ast.body.cases).toHaveLength(1);
+    expect(ast.body.fallback.value).toBe("fallback");
+  });
+
+  test("parses infix function calls left-associatively", () => {
+    // `a fn b fn c` → fn(fn(a, b), c)
+    const ast = parseSrc(`---\na fn b fn c`);
+    expect(ast.body.kind).toBe("Call");
+    expect(ast.body.callee.name).toBe("fn");
+    expect(ast.body.args[0].kind).toBe("Call");
+    expect(ast.body.args[0].callee.name).toBe("fn");
+    expect(ast.body.args[1].name).toBe("c");
+  });
+
+  test("auto-wraps `$` references in call args as Lambda", () => {
+    const ast = parseSrc(`---\napplyTo(5, $ * 2)`);
+    expect(ast.body.kind).toBe("Call");
+    const arg = ast.body.args[1];
+    expect(arg.kind).toBe("Lambda");
+    expect(arg.params).toEqual(["$"]);
+  });
+
+  test("auto-wraps `$` and `$$` together, with the correct param count", () => {
+    const ast = parseSrc(`---\ncombine(2, 3, $ + $$)`);
+    const arg = ast.body.args[2];
+    expect(arg.kind).toBe("Lambda");
+    expect(arg.params).toEqual(["$", "$$"]);
+  });
+
+  test("explicit lambdas are NOT auto-wrapped", () => {
+    const ast = parseSrc(`---\napplyTo(5, (x) -> x + 1)`);
+    const arg = ast.body.args[1];
+    expect(arg.kind).toBe("Lambda");
+    expect(arg.params).toEqual(["x"]); // not "$"
+  });
+
+  test("parses function calls in postfix position", () => {
+    const ast = parseSrc(`---\nf(1, 2)`);
+    expect(ast.body.kind).toBe("Call");
+    expect(ast.body.callee.kind).toBe("Ident");
+    expect(ast.body.callee.name).toBe("f");
+    expect(ast.body.args.map((a) => a.value)).toEqual([1, 2]);
+  });
+
   test("accepts header directives in any order", () => {
     const src = `%dw 2.0
 var tax = 0.1

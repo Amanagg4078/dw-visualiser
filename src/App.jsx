@@ -11,6 +11,7 @@ const PHASE_COLORS = {
   literal: "#6b7280", lookup: "#2563eb", selector: "#0891b2", "index-selector": "#0e7490",
   "range-selector": "#155e75", "multi-value-selector": "#0e7490", "descendants-selector": "#1e40af",
   binop: "#8b5cf6", unary: "#8b5cf6", logical: "#d946ef",
+  "if-else": "#db2777", lambda: "#0d9488", call: "#16a34a", match: "#be185d",
   "object-start": "#059669", "object-field": "#10b981", "object-done": "#15803d",
   "array-start": "#059669", "array-item": "#10b981", "array-done": "#15803d",
   "var-start": "#a16207", "var-done": "#ca8a04",
@@ -128,6 +129,9 @@ function JsonView({ value, indent = 0 }) {
   const pad = (n) => " ".repeat(n * 2);
 
   if (value === null || value === undefined) return <span style={{ color: "var(--text-muted)" }}>null</span>;
+  if (typeof value === "object" && value.__closure === true) {
+    return <span style={{ color: "var(--accent-soft)" }}>{`<fn (${(value.params || []).join(", ")})>`}</span>;
+  }
   if (typeof value === "boolean") return <span style={{ color: "var(--json-bool)" }}>{String(value)}</span>;
   if (typeof value === "number")  return <span style={{ color: "var(--frame-value)" }}>{String(value)}</span>;
   if (typeof value === "string")  return <span style={{ color: "var(--text-output)" }}>{JSON.stringify(value)}</span>;

@@ -877,6 +877,421 @@ var isStudent = payload.isStudent
     ],
   },
 
+  // ─── Chapter 5: Flow Control ────────────────────────────────────────────
+  {
+    id: "5.1-if-else",
+    chapter: "5.1",
+    title: "If / Else",
+    description:
+      "`if (cond) thenExpr else elseExpr` is a regular **expression** — it returns a value, so you can put it anywhere a value goes (inside an object field, as a var initializer, even as a function argument). Both arms are required; only the taken arm is evaluated.",
+    tutorialUrl: "https://dataweave.mulesoft.com/learn/tutorial/5.1-If_Else",
+    script: `%dw 2.0
+output application/json
+var age = payload.age
+---
+{
+  status:     if (age >= 18) "adult" else "minor",
+  drinkAge:   if (age >= 21) "yes" else "no",
+  scale:      if (payload.score > 90) "excellent"
+              else if (payload.score > 70) "good"
+              else "needs work",
+  nameOrAnon: if (payload.name != null) payload.name else "anonymous",
+  inField:    { kind: if (age >= 18) "ok" else "blocked" }
+}`,
+    payload: { age: 21, score: 85, name: "Alice" },
+    annotations: [
+      {
+        lineRange: [1, 4],
+        title: "Header + the condition input",
+        body: "We bind `age` from payload — vars work just like before. The body uses `age` and a few other payload fields to demonstrate branching.",
+      },
+      {
+        lineRange: [6, 6],
+        title: "Basic `if (cond) X else Y`",
+        body: "Parens around the condition are required. **Both branches are required** — DataWeave's `if` is an expression that always produces a value, never a statement.",
+      },
+      {
+        lineRange: [7, 7],
+        title: "Comparison operators feed the condition",
+        body: "Anything that produces a boolean works: `==`, `!=`, `<`, `>`, `<=`, `>=`, `and`/`or`/`not`, or a function returning a Bool.",
+      },
+      {
+        lineRange: [8, 10],
+        title: "Chained `else if`",
+        body: "There's no special `elif`/`elsif` syntax — chains are just an `if` nested inside the else arm. The engine parses this exactly as `if (...) … else (if (...) … else …)`.",
+      },
+      {
+        lineRange: [11, 11],
+        title: "Fallback for nullable payloads",
+        body: "`if (x != null) x else default` is a common idiom. (DataWeave also has a dedicated `default` operator we'll cover later.)",
+      },
+      {
+        lineRange: [12, 12],
+        title: "`if` is an expression — it lives inside other expressions",
+        body: "Because `if` returns a value, you can put it directly inside an object literal, an array element, or a function argument. No wrapping needed.",
+      },
+    ],
+  },
+
+  {
+    id: "5.2-literal-pattern-matching",
+    chapter: "5.2",
+    title: "Literal Pattern Matching",
+    description:
+      "`<expr> match { case <lit> -> <result> ... else -> <fallback> }` is a multi-way conditional. Each case compares the subject against a literal; the first matching case's result becomes the value of the whole expression. If none match, the `else` (or trailing `case ->`) fallback runs. Like `if/else`, `match` is an **expression** — its value can be assigned, nested, returned anywhere.",
+    tutorialUrl: "https://dataweave.mulesoft.com/learn/tutorial/5.2-Literal_Pattern_Matching",
+    script: `%dw 2.0
+output application/json
+---
+{
+  action: payload.action match {
+    case "buy"  -> "Buy at market price"
+    case "sell" -> "Sell at market price"
+    case "hold" -> "Hold the asset"
+    else        -> "Invalid action"
+  },
+  numeric: payload.status match {
+    case 0 -> "off"
+    case 1 -> "on"
+    else   -> "unknown"
+  },
+  noFallback: payload.flag match {
+    case true -> "yes"
+  }
+}`,
+    payload: { action: "buy", status: 1, flag: false },
+    annotations: [
+      {
+        lineRange: [1, 3],
+        title: "Standard header",
+        body: "Header + separator. The body is one object whose values each demonstrate a different match.",
+      },
+      {
+        lineRange: [5, 10],
+        title: "Match on strings",
+        body: "`payload.action match { case \"buy\" -> … }`. DataWeave evaluates the **subject** once, then walks each case top-to-bottom comparing with strict equality (`==`). First match wins; remaining cases are never evaluated.",
+      },
+      {
+        lineRange: [6, 8],
+        title: "One `case` per arm",
+        body: "Each `case <literal> -> <result>` is a possible branch. The `<result>` can be any expression — a literal, a payload selector, a function call, even another `match`.",
+      },
+      {
+        lineRange: [9, 9],
+        title: "`else -> …` is the fallback",
+        body: "Required to cover the \"no case matched\" path. Without it, the match returns `null` when nothing matches (see the third example below).",
+      },
+      {
+        lineRange: [11, 15],
+        title: "Match on numbers, booleans — any literal type",
+        body: "`case 0 ->`, `case true ->`, `case \"hi\" ->` all work the same way. Equality is strict and typed: `1 == \"1\"` is `false`, so `case 1 ->` won't match a payload value of `\"1\"`.",
+      },
+      {
+        lineRange: [16, 18],
+        title: "Match with no matching case → null",
+        body: "When neither a `case` nor an `else` matches, the result is `null`. Useful when `null` is a fine \"unhandled\" sentinel; otherwise add `else -> …`. Real DataWeave tutorial also allows a `case -> <fallback>` form (no literal) which is equivalent to `else -> <fallback>`.",
+      },
+    ],
+  },
+
+  // ─── Chapter 6: Functions ────────────────────────────────────────────────
+  {
+    id: "6.1-named-functions",
+    chapter: "6.1",
+    title: "Named Functions",
+    description:
+      "`fun name(params) = body` declares a reusable function in the header. Functions are evaluated like `var` declarations — same scoping rules, same order. Functions can call themselves (recursion) and can call other functions declared before them.",
+    tutorialUrl: "https://dataweave.mulesoft.com/learn/tutorial/6.1-Named_functions",
+    script: `%dw 2.0
+output application/json
+fun double(x) = x * 2
+fun greet(name) = "Hello, " ++ name ++ "!"
+fun area(width, height) = width * height
+fun fact(n) = if (n <= 1) 1 else n * fact(n - 1)
+---
+{
+  doubled:   double(21),
+  greeted:   greet(payload.name),
+  rectangle: area(payload.w, payload.h),
+  factorial: fact(payload.n)
+}`,
+    payload: { name: "Aman", w: 4, h: 5, n: 5 },
+    annotations: [
+      {
+        lineRange: [1, 2],
+        title: "Standard header",
+        body: "`%dw` + `output`. Functions come next.",
+      },
+      {
+        lineRange: [3, 3],
+        title: "Simplest function: one param, one expression",
+        body: "`fun double(x) = x * 2`. Everything after the `=` is the body — a single expression. **No `return`, no braces.** The whole expression's value is the return value.",
+      },
+      {
+        lineRange: [4, 4],
+        title: "Functions use everything you already know",
+        body: "Body is just an expression. You can use `++` for string concat, payload selectors, arithmetic — same vocabulary as the body of any script.",
+      },
+      {
+        lineRange: [5, 5],
+        title: "Multiple parameters",
+        body: "Comma-separated. Position-bound: `area(4, 5)` means `width = 4`, `height = 5`.",
+      },
+      {
+        lineRange: [6, 6],
+        title: "Recursion works",
+        body: "A function can call itself. `fact` uses an `if` to terminate, multiplying by the recursive call. Step through `fact(5)` to watch the call frames push and pop.",
+      },
+      {
+        lineRange: [7, 7],
+        title: "Separator",
+        body: "End of header. The body below is where the functions get called.",
+      },
+      {
+        lineRange: [8, 13],
+        title: "Calling functions: `name(args)`",
+        body: "Same shape as math: function name, then comma-separated args in parens. Each call evaluates the args, pushes a new scope frame with params bound, and runs the body — exactly what `area(4, 5)` does here.",
+      },
+    ],
+  },
+
+  {
+    id: "6.2-lambdas",
+    chapter: "6.2",
+    title: "Lambdas",
+    description:
+      "A lambda is an anonymous function: `(params) -> body`. Same shape as `fun`, just no name — useful for one-off transformations or passing into other functions. Lambdas **close over their surrounding scope** — they capture vars in scope at the point they're defined.",
+    tutorialUrl: "https://dataweave.mulesoft.com/learn/tutorial/6.2-Lambdas",
+    script: `%dw 2.0
+output application/json
+var pi = 3.14159
+var inc = (x) -> x + 1
+var add = (a, b) -> a + b
+var ringArea = (r) -> pi * r * r
+var greet = () -> "Hello, World!"
+---
+{
+  one:        inc(0),
+  two:        inc(inc(0)),
+  sum:        add(payload.a, payload.b),
+  area:       ringArea(payload.radius),
+  hello:      greet()
+}`,
+    payload: { a: 10, b: 32, radius: 5 },
+    annotations: [
+      {
+        lineRange: [1, 2],
+        title: "Header",
+        body: "`%dw` + `output`. The lesson uses several vars holding lambdas.",
+      },
+      {
+        lineRange: [3, 3],
+        title: "A regular var, for reference",
+        body: "`pi` is just a number, declared with `var`. The next line shows the *shape difference* between a value var and a function var.",
+      },
+      {
+        lineRange: [4, 4],
+        title: "Anonymous function syntax: `(params) -> body`",
+        body: "`(x) -> x + 1` is a function with one parameter and one expression as the body. It's a *value* — assigned to a var like any other.",
+      },
+      {
+        lineRange: [5, 5],
+        title: "Multiple parameters",
+        body: "Comma-separated, exactly like `fun`. Lambdas and named functions are interchangeable; `fun foo(x) = x + 1` is sugar for `var foo = (x) -> x + 1`.",
+      },
+      {
+        lineRange: [6, 6],
+        title: "Closures: capture surrounding scope",
+        body: "`ringArea` references `pi`, which is declared in the outer scope. The lambda **closes over** that — even if `pi` were used in a much deeper context, the lambda would still see it. Step into a call to watch the scope panel show both `pi` and `r`.",
+      },
+      {
+        lineRange: [7, 7],
+        title: "Zero-arg lambdas are valid",
+        body: "`() -> \"Hello, World!\"` is a function that takes no arguments. Call it as `greet()`.",
+      },
+      {
+        lineRange: [8, 14],
+        title: "Calling lambdas",
+        body: "Same syntax as named functions: `varName(args)`. There's no real distinction at call site — both are just function values.",
+      },
+    ],
+  },
+
+  {
+    id: "6.3-function-as-value",
+    chapter: "6.3",
+    title: "Function as Value",
+    description:
+      "Functions are **first-class** in DataWeave: you can pass them as arguments, return them from other functions, and store them in vars or object fields. This is the foundation for `map`, `filter`, `reduce`, and every other array transformation you'll meet in Chapter 7.",
+    tutorialUrl: "https://dataweave.mulesoft.com/learn/tutorial/6.3-Function_as_value",
+    script: `%dw 2.0
+output application/json
+var inc = (x) -> x + 1
+var dbl = (x) -> x * 2
+
+// A higher-order function: takes another function and a value.
+fun applyTwice(f, x) = f(f(x))
+
+// A function that returns a function.
+fun makeAdder(n) = (x) -> x + n
+
+var addFive = makeAdder(5)
+---
+{
+  twiceInc:     applyTwice(inc, 10),
+  twiceDbl:     applyTwice(dbl, 3),
+  pickedFn:     (if (payload.op == "inc") inc else dbl)(payload.n),
+  closureAdd:   addFive(100),
+  stillWorks:   addFive(addFive(0))
+}`,
+    payload: { op: "inc", n: 7 },
+    annotations: [
+      {
+        lineRange: [1, 5],
+        title: "Two lambdas to use as arguments",
+        body: "`inc` and `dbl` are just function values stored in vars. Nothing special — yet.",
+      },
+      {
+        lineRange: [6, 7],
+        title: "Higher-order function: a function that takes a function",
+        body: "`applyTwice(f, x)` calls `f(f(x))` — runs `f` on `x` twice. The first parameter is *any* function. This is the pattern `map` / `filter` / `reduce` use under the hood.",
+      },
+      {
+        lineRange: [9, 10],
+        title: "Function that returns a function",
+        body: "`makeAdder(5)` returns a brand-new function `(x) -> x + 5`. The returned function **captures** `n = 5` from `makeAdder`'s frame — that's a closure in action.",
+      },
+      {
+        lineRange: [11, 11],
+        title: "Storing a captured function",
+        body: "`addFive` is now a function value — the one that adds 5. The frame in which `n` was 5 is kept alive *only* because `addFive` references it.",
+      },
+      {
+        lineRange: [12, 12],
+        title: "Separator",
+        body: "Body starts below.",
+      },
+      {
+        lineRange: [13, 14],
+        title: "Passing a function as an argument",
+        body: "`applyTwice(inc, 10)` passes `inc` itself — the function value, not its result. `applyTwice` then calls it twice: `inc(inc(10))` → `12`.",
+      },
+      {
+        lineRange: [15, 15],
+        title: "Choosing a function dynamically",
+        body: "An `if`-expression that evaluates to a function value, then calls it. `(if (payload.op == \"inc\") inc else dbl)(payload.n)` picks which function to apply at runtime.",
+      },
+      {
+        lineRange: [16, 17],
+        title: "Closures keep their captured state",
+        body: "Every call to `addFive` still sees the original `n = 5`. Closures are independent — `makeAdder(10)` would return a different function with its own captured `n = 10`.",
+      },
+    ],
+  },
+
+  {
+    id: "6.4-infix-notation",
+    chapter: "6.4",
+    title: "Infix Notation",
+    description:
+      "Any two-argument function can be called in **infix** position: `arg1 fnName arg2` is exactly the same as `fnName(arg1, arg2)`. It reads more like English and chains cleanly. (The tutorial uses `filter` for the examples; we'll revisit those once Chapter 7 ships. For now we demonstrate the syntax with hand-rolled helpers.)",
+    tutorialUrl: "https://dataweave.mulesoft.com/learn/tutorial/6.4-Infix_notation",
+    script: `%dw 2.0
+output application/json
+fun add(a, b) = a + b
+fun applyTo(arg, f) = f(arg)
+---
+{
+  prefix:    add(2, 3),
+  infix:     2 add 3,
+  chained:   10 applyTo ((x) -> x + 1) applyTo ((x) -> x * 2),
+  withLogic: payload.score applyTo ((s) -> if (s >= 80) "pass" else "fail")
+}`,
+    payload: { score: 85 },
+    annotations: [
+      {
+        lineRange: [1, 4],
+        title: "Header + two helpers",
+        body: "`add(a, b)` is a plain binary function. `applyTo(arg, f)` is a one-shot higher-order helper — passes `arg` into `f`. Both are eligible for infix calls.",
+      },
+      {
+        lineRange: [6, 6],
+        title: "Standard prefix call",
+        body: "`add(2, 3)` — the way you've been calling functions all along. Reads function-first.",
+      },
+      {
+        lineRange: [7, 7],
+        title: "Infix call — same function, different shape",
+        body: "`2 add 3` is **identical** to `add(2, 3)`. The function name sits *between* its two arguments. It's pure syntax sugar — same `Call` AST node, same evaluation.",
+      },
+      {
+        lineRange: [8, 8],
+        title: "Chained infix is left-associative",
+        body: "`10 applyTo A applyTo B` parses as `(10 applyTo A) applyTo B` — apply `A` to 10, then apply `B` to the result. Reads naturally left-to-right, like a pipeline.",
+      },
+      {
+        lineRange: [9, 9],
+        title: "Infix mixes with everything else",
+        body: "The second argument is any expression — here a lambda containing an `if/else`. Parens around the lambda are important so the parser knows where it ends.",
+      },
+    ],
+  },
+
+  {
+    id: "6.5-dollar-syntax",
+    chapter: "6.5",
+    title: "`$`, `$$`, `$$$` Implicit Params",
+    description:
+      "When a function argument uses `$` (or `$$`, `$$$`), it's automatically wrapped as a lambda whose params are positional: `$` is the first param, `$$` the second, `$$$` the third. Lets you write tiny one-shot lambdas without naming the params at all.",
+    tutorialUrl: "https://dataweave.mulesoft.com/learn/tutorial/6.5-$,-$$,-$$$-syntax",
+    script: `%dw 2.0
+output application/json
+fun applyTo(arg, f) = f(arg)
+fun combine(a, b, f) = f(a, b)
+fun triple(a, b, c, f) = f(a, b, c)
+---
+{
+  doubled:    10 applyTo ($ * 2),
+  fieldOnly:  payload applyTo $.name,
+  added:      combine(2, 3, $ + $$),
+  product:    triple(2, 3, 4, $ * $$ * $$$),
+  explicit:   10 applyTo ((x) -> x + 100)
+}`,
+    payload: { name: "Aman" },
+    annotations: [
+      {
+        lineRange: [1, 5],
+        title: "Header + helpers (taking 1, 2, 3 args)",
+        body: "Three small higher-order helpers — each takes a function with a different arity. The lessons below show how `$`, `$$`, `$$$` line up with first, second, third params.",
+      },
+      {
+        lineRange: [7, 7],
+        title: "`$` = the first (and only) param",
+        body: "`10 applyTo ($ * 2)` is shorthand for `10 applyTo (($) -> $ * 2)`, which is the same as `applyTo(10, ($) -> $ * 2)`. The parser sees `$` in the arg, auto-wraps it as a one-param lambda. Result: `20`.",
+      },
+      {
+        lineRange: [8, 8],
+        title: "`$` works with selectors and other operators",
+        body: "`$.name` reaches into the implicit lambda's argument. `payload applyTo $.name` returns `payload.name`. You can do `$ + 1`, `$ > 5`, `$ ++ \"x\"` — anything that uses `$` becomes a lambda body.",
+      },
+      {
+        lineRange: [9, 9],
+        title: "`$$` is the second param",
+        body: "`combine(2, 3, $ + $$)` auto-wraps as `combine(2, 3, ($, $$) -> $ + $$)`. The parser detects that the highest dollar used is `$$`, so it makes a two-param lambda. Result: `5`.",
+      },
+      {
+        lineRange: [10, 10],
+        title: "`$$$` is the third — same pattern scales",
+        body: "Three params, three dollars. Beyond three, you'd switch to explicit `(a, b, c, d) -> …` syntax.",
+      },
+      {
+        lineRange: [11, 11],
+        title: "Explicit lambdas still work, of course",
+        body: "If you'd rather name the params, just write `(x) -> x + 100`. The `$` form is a convenience, not a replacement.",
+      },
+    ],
+  },
+
   // ─── Free-form playground samples ──────────────────────────────────────
   {
     id: "intro-receipt",

@@ -1,4 +1,4 @@
-import { dwApplyBinOp, dwNeg, dwBool, dwNot } from "./semantics.js";
+import { dwApplyBinOp, dwNeg, dwBool, dwNot, dwEq } from "./semantics.js";
 
 export function evaluate(script, payload) {
   const trace = [];
@@ -18,7 +18,9 @@ export function evaluate(script, payload) {
       expr: exprToStr(v.expr),
     });
     const value = evalExpr(v.expr);
-    scopeChain[0][v.name] = value;
+    // Assignment goes to the current top frame. When called frames are pushed
+    // later (function bodies), vars in headers don't run there anyway.
+    scopeChain[scopeChain.length - 1][v.name] = value;
     emit({
       phase: "var-done",
       description: `var ${v.name} = ${formatValue(value)}`,
@@ -55,8 +57,19 @@ export function evaluate(script, payload) {
       return null;
     }
     if (node.kind === "Ident") {
-      const value = scopeChain[0][node.name];
-      if (value === undefined) throw new Error(`Unknown identifier: ${node.name} at line ${node.line}`);
+      // Walk the scope chain from the top (most recent frame, usually a
+      // function-call frame) back to the script root. Once functions land
+      // there can be multiple frames; today there's usually just one.
+      let value;
+      let found = false;
+      for (let i = scopeChain.length - 1; i >= 0; i--) {
+        if (Object.prototype.hasOwnProperty.call(scopeChain[i], node.name)) {
+          value = scopeChain[i][node.name];
+          found = true;
+          break;
+        }
+      }
+      if (!found) throw new Error(`Unknown identifier: ${node.name} at line ${node.line}`);
       emit({ phase: "lookup", description: `Look up \`${node.name}\``, line: node.line, expr: node.name, value });
       return value;
     }
@@ -218,6 +231,101 @@ export function evaluate(script, payload) {
       emit({ phase: "logical", description: `${formatValue(l)} ${node.op} ${formatValue(r)}`, line: node.line, expr: exprToStr(node), value: result });
       return result;
     }
+    if (node.kind === "MatchExpr") {
+      // Evaluate the subject once, then try cases in order. Each case's
+      // literal is evaluated and compared via dwEq (strict). First match
+      // wins; trace records which case matched (and via what literal).
+      const subject = evalExpr(node.subject);
+      for (let i = 0; i < node.cases.length; i++) {
+        const c = node.cases[i];
+        const litV = evalExpr(c.literal);
+        if (dwEq(subject, litV)) {
+          const result = evalExpr(c.result);
+          emit({
+            phase: "match",
+            description: `match: case ${i + 1} (${formatValue(litV)}) matched`,
+            line: node.line,
+            expr: exprToStr(node),
+            value: result,
+          });
+          return result;
+        }
+      }
+      // No case matched — take the fallback if present, otherwise null.
+      let result = null;
+      if (node.fallback) result = evalExpr(node.fallback);
+      emit({
+        phase: "match",
+        description: node.fallback ? "match: no case matched, took fallback" : "match: no case matched, no fallback → null",
+        line: node.line,
+        expr: exprToStr(node),
+        value: result,
+      });
+      return result;
+    }
+    if (node.kind === "IfElse") {
+      // Lazy: only evaluate the branch we take. Tracer notes which side.
+      const condV = evalExpr(node.cond);
+      const truthy = dwBool(condV);
+      const taken = truthy ? "then" : "else";
+      const result = truthy ? evalExpr(node.then) : evalExpr(node.else);
+      emit({
+        phase: "if-else",
+        description: `if (${formatValue(condV)}) → ${taken} branch`,
+        line: node.line,
+        expr: exprToStr(node),
+        value: result,
+      });
+      return result;
+    }
+    if (node.kind === "Lambda") {
+      // Capture a *reference* to each frame in the current chain so the
+      // closure picks up vars/functions defined alongside it (and any
+      // forward-defined siblings in the same frame).
+      const closure = {
+        __closure: true,
+        params: node.params,
+        body: node.body,
+        captured: scopeChain.slice(),
+      };
+      emit({
+        phase: "lambda",
+        description: `Define lambda (${node.params.join(", ")}) -> …`,
+        line: node.line,
+        expr: exprToStr(node),
+        value: closure,
+      });
+      return closure;
+    }
+    if (node.kind === "Call") {
+      const callee = evalExpr(node.callee);
+      if (!callee || callee.__closure !== true) {
+        throw new Error(`Cannot call non-function at line ${node.line}`);
+      }
+      const args = node.args.map((a) => evalExpr(a));
+      const frame = {};
+      callee.params.forEach((pname, i) => { frame[pname] = i < args.length ? args[i] : null; });
+      // Swap the live chain to the closure's captured chain + this call's frame.
+      // Saves + restores so nested calls compose.
+      const savedChain = scopeChain.slice();
+      scopeChain.length = 0;
+      for (const f of callee.captured) scopeChain.push(f);
+      scopeChain.push(frame);
+      try {
+        const result = evalExpr(callee.body);
+        emit({
+          phase: "call",
+          description: `${exprToStr(node.callee)}(${args.map(formatValue).join(", ")})`,
+          line: node.line,
+          expr: exprToStr(node),
+          value: result,
+        });
+        return result;
+      } finally {
+        scopeChain.length = 0;
+        for (const f of savedChain) scopeChain.push(f);
+      }
+    }
     if (node.kind === "LogicalNot") {
       const v = evalExpr(node.operand);
       const result = dwNot(v);
@@ -254,6 +362,10 @@ export function evaluate(script, payload) {
 export function formatValue(v) {
   if (v === null || v === undefined) return "null";
   if (typeof v === "string") return JSON.stringify(v);
+  if (typeof v === "function") return "<function>";
+  if (typeof v === "object" && v.__closure === true) {
+    return `<fn (${(v.params || []).join(", ")})>`;
+  }
   if (typeof v === "object") return JSON.stringify(v);
   return String(v);
 }
@@ -273,6 +385,10 @@ export function exprToStr(node) {
     case "LogicalOp": return `(${exprToStr(node.left)} ${node.op} ${exprToStr(node.right)})`;
     case "LogicalNot": return `not ${exprToStr(node.operand)}`;
     case "UnaryOp": return `${node.op}${exprToStr(node.operand)}`;
+    case "IfElse": return `if (${exprToStr(node.cond)}) ${exprToStr(node.then)} else ${exprToStr(node.else)}`;
+    case "Lambda": return `(${node.params.join(", ")}) -> ${exprToStr(node.body)}`;
+    case "Call": return `${exprToStr(node.callee)}(${node.args.map(exprToStr).join(", ")})`;
+    case "MatchExpr": return `${exprToStr(node.subject)} match { … }`;
     case "ObjectLit": return `{${node.fields.map(f => `${f.key}: ${exprToStr(f.value)}`).join(", ")}}`;
     case "ArrayLit": return `[${node.items.map((it) => exprToStr(it.value)).join(", ")}]`;
     default: return "?";

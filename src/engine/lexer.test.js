@@ -89,4 +89,36 @@ describe("lexer", () => {
       TOK.LT,    TOK.IDENT, TOK.GT,    TOK.IDENT, TOK.EOF,
     ]);
   });
+
+  test("recognises if / else / fun keywords + -> arrow", () => {
+    const toks = tokenize("if cond fun add else x -> y");
+    expect(types(toks)).toEqual([
+      TOK.IF, TOK.IDENT, TOK.FUN, TOK.IDENT, TOK.ELSE,
+      TOK.IDENT, TOK.ARROW, TOK.IDENT, TOK.EOF,
+    ]);
+  });
+
+  test("distinguishes `---` separator from `->` arrow", () => {
+    const toks = tokenize("---\nx -> y");
+    expect(types(toks)).toEqual([
+      TOK.SEPARATOR, TOK.IDENT, TOK.ARROW, TOK.IDENT, TOK.EOF,
+    ]);
+  });
+
+  test("recognises match / case keywords", () => {
+    const toks = tokenize("x match { case 1 -> a else -> b }");
+    expect(types(toks)).toEqual([
+      TOK.IDENT, TOK.MATCH, TOK.LBRACE,
+      TOK.CASE, TOK.NUM, TOK.ARROW, TOK.IDENT,
+      TOK.ELSE, TOK.ARROW, TOK.IDENT,
+      TOK.RBRACE, TOK.EOF,
+    ]);
+  });
+
+  test("recognises $ / $$ / $$$ as separate tokens, longest match first", () => {
+    const toks = tokenize("$ $$ $$$");
+    expect(types(toks)).toEqual([
+      TOK.DOLLAR1, TOK.DOLLAR2, TOK.DOLLAR3, TOK.EOF,
+    ]);
+  });
 });

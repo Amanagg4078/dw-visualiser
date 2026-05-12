@@ -3,6 +3,10 @@ export const TOK = {
   PLUS: "+", MINUS: "-", STAR: "*", SLASH: "/", CONCAT: "++",
   EQ: "==", NEQ: "!=", LT: "<", GT: ">", LTE: "<=", GTE: ">=",
   AND: "and", OR: "or", NOT: "not",
+  IF: "if", ELSE: "else", FUN: "fun",
+  MATCH: "match", CASE: "case",
+  ARROW: "->",
+  DOLLAR1: "$", DOLLAR2: "$$", DOLLAR3: "$$$",
   ASSIGN: "=", LPAREN: "(", RPAREN: ")", LBRACE: "{", RBRACE: "}",
   LBRACK: "[", RBRACK: "]", COMMA: ",", COLON: ":", DOT: ".",
   DOT_STAR: ".*",   // multi-value selector: `obj.*field` / `arr.*field`
@@ -42,6 +46,27 @@ export function tokenize(src) {
       push(TOK.SEPARATOR, "---", startLine, startCol);
       continue;
     }
+    if (c === "-" && peek(1) === ">") {
+      advance(); advance();
+      push(TOK.ARROW, "->", startLine, startCol);
+      continue;
+    }
+    // $ / $$ / $$$ implicit positional lambda params. Longest match first.
+    if (c === "$") {
+      if (peek(1) === "$" && peek(2) === "$") {
+        advance(); advance(); advance();
+        push(TOK.DOLLAR3, "$$$", startLine, startCol);
+        continue;
+      }
+      if (peek(1) === "$") {
+        advance(); advance();
+        push(TOK.DOLLAR2, "$$", startLine, startCol);
+        continue;
+      }
+      advance();
+      push(TOK.DOLLAR1, "$", startLine, startCol);
+      continue;
+    }
     if (c === '"') {
       advance(); let v = "";
       while (i < src.length && peek() !== '"') {
@@ -72,6 +97,11 @@ export function tokenize(src) {
       else if (v === "and") push(TOK.AND, v, startLine, startCol);
       else if (v === "or") push(TOK.OR, v, startLine, startCol);
       else if (v === "not") push(TOK.NOT, v, startLine, startCol);
+      else if (v === "if") push(TOK.IF, v, startLine, startCol);
+      else if (v === "else") push(TOK.ELSE, v, startLine, startCol);
+      else if (v === "fun") push(TOK.FUN, v, startLine, startCol);
+      else if (v === "match") push(TOK.MATCH, v, startLine, startCol);
+      else if (v === "case") push(TOK.CASE, v, startLine, startCol);
       else if (v === "true" || v === "false") push(TOK.BOOL, v === "true", startLine, startCol);
       else if (v === "null") push(TOK.NULL, null, startLine, startCol);
       else push(TOK.IDENT, v, startLine, startCol);
