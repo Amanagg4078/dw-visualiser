@@ -1,5 +1,23 @@
 import { TOK } from "./lexer.js";
 
+// Built-in higher-order functions for which `$ / $$ / $$$` implicit-lambda
+// auto-wrapping is enabled. Real DataWeave only allows the dollar-sign
+// syntax for "functions DataWeave provides" (per the official 6.5 lesson),
+// not arbitrary user-defined HOFs. Extend this set when we add more
+// built-ins (Chapter 7 stdlib).
+const KNOWN_HOFS = new Set([
+  "filter", "map", "reduce",
+  "filterObject", "mapObject", "pluck",
+  "distinctBy", "groupBy", "orderBy",
+  "sumBy", "avgBy", "maxBy", "minBy",
+  "flatMap",
+]);
+
+// Note: `update` and `at` are *contextual* keywords — recognised by string
+// comparison inside the parser (parseExpr / parseUpdateTail) rather than as
+// dedicated lexer tokens. That keeps them as valid identifiers everywhere
+// else (`var update = 1`, `obj.at`, etc.).
+
 // Tokens whose source text is a valid identifier even though they're
 // reserved as keywords elsewhere. Used as field names after `.` and as
 // bare object keys — DataWeave treats these as "soft" keywords.
@@ -51,22 +69,63 @@ export function parse(tokens) {
   };
 
   // Header: %dw, output, and var declarations may appear in any order.
-  // %dw and output are currently parsed-then-ignored by the evaluator, so
-  // their position doesn't affect runtime behaviour. Vars are evaluated in
-  // declaration order at eval time.
-  const header = { vars: [], output: "application/json" };
+  // %dw is parsed-then-ignored. `output <mime>` records the MIME plus any
+  // trailing directive flags (e.g. `skipNullOn = "everywhere"`). Vars are
+  // evaluated in declaration order at eval time.
+  const header = { vars: [], output: "application/json", skipNullOn: null };
   while (peek().type !== TOK.SEPARATOR && peek().type !== TOK.EOF) {
     const t = peek();
     if (t.type === TOK.DW_DIRECTIVE) {
       p++;
     } else if (t.type === TOK.OUTPUT) {
       p++;
+      // MIME is `type` or `type/subtype` — exactly one IDENT, optionally a
+      // SLASH + IDENT. Any further IDENT is a directive flag, NOT more mime.
       let mime = "";
-      while (peek().type === TOK.IDENT || peek().type === TOK.SLASH) {
+      if (peek().type === TOK.IDENT) {
         mime += peek().value;
         p++;
+        if (peek().type === TOK.SLASH) {
+          mime += peek().value;
+          p++;
+          if (peek().type === TOK.IDENT) {
+            mime += peek().value;
+            p++;
+          }
+        }
       }
       header.output = mime;
+      // Optional trailing directive flags: `<name> = <value>`. We only
+      // recognise `skipNullOn` today; anything else is parsed and ignored.
+      while (peek().type === TOK.IDENT && tokens[p + 1] && tokens[p + 1].type === TOK.ASSIGN) {
+        const name = tokens[p++].value;
+        p++; // '='
+        let value = null;
+        if (peek().type === TOK.STR) value = tokens[p++].value;
+        else if (peek().type === TOK.IDENT) value = tokens[p++].value;
+        else if (peek().type === TOK.BOOL) value = tokens[p++].value;
+        if (name === "skipNullOn") header.skipNullOn = value;
+      }
+    } else if (t.type === TOK.IDENT && t.value === "import") {
+      // `import dw::core::Strings` / `import a, b from dw::core::Arrays`
+      // Real DW requires these to use stdlib functions like `substring`,
+      // `sumBy`, `isString`, etc. We expose them as unqualified built-ins,
+      // so the import is a no-op — but we parse it so tutorial-correct
+      // scripts validate against our engine too. Consume until newline (we
+      // don't track newlines, so consume until the next header keyword,
+      // SEPARATOR, or EOF).
+      p++;
+      while (
+        peek().type !== TOK.SEPARATOR &&
+        peek().type !== TOK.EOF &&
+        peek().type !== TOK.VAR &&
+        peek().type !== TOK.FUN &&
+        peek().type !== TOK.OUTPUT &&
+        peek().type !== TOK.DW_DIRECTIVE &&
+        !(peek().type === TOK.IDENT && peek().value === "import")
+      ) {
+        p++;
+      }
     } else if (t.type === TOK.VAR) {
       const tok = eat(TOK.VAR);
       const name = eat(TOK.IDENT).value;
@@ -76,18 +135,25 @@ export function parse(tokens) {
     } else if (t.type === TOK.FUN) {
       // `fun name(params) = body` — sugar for `var name = (params) -> body`.
       // Stored in the same `header.vars` list so evaluation order is preserved.
+      // Params may carry default values: `fun f(a, b = 10) = ...`.
       const tok = eat(TOK.FUN);
       const name = eat(TOK.IDENT).value;
       eat(TOK.LPAREN);
       const params = [];
+      const paramDefaults = [];
       if (peek().type !== TOK.RPAREN) {
         params.push(eat(TOK.IDENT).value);
-        while (peek().type === TOK.COMMA) { p++; params.push(eat(TOK.IDENT).value); }
+        paramDefaults.push(peek().type === TOK.ASSIGN ? (p++, parseExpr()) : null);
+        while (peek().type === TOK.COMMA) {
+          p++;
+          params.push(eat(TOK.IDENT).value);
+          paramDefaults.push(peek().type === TOK.ASSIGN ? (p++, parseExpr()) : null);
+        }
       }
       eat(TOK.RPAREN);
       eat(TOK.ASSIGN);
       const body = parseExpr();
-      const lambda = { kind: "Lambda", params, body, line: tok.line };
+      const lambda = { kind: "Lambda", params, paramDefaults, body, line: tok.line };
       header.vars.push({ kind: "VarDecl", name, expr: lambda, line: tok.line });
     } else {
       throw new Error(`Unexpected token in header: ${t.type} (${t.value}) at line ${t.line}:${t.col}`);
@@ -99,9 +165,67 @@ export function parse(tokens) {
 
   function parseExpr() {
     if (peek().type === TOK.IF) return parseIfElse();
-    const head = parseInfix();
-    if (peek().type === TOK.MATCH) return parseMatchTail(head);
+    let head = parseInfix();
+    if (peek().type === TOK.MATCH) head = parseMatchTail(head);
+    // `update` is a postfix on any expression, like match. Soft-keyword via
+    // IDENT === "update".
+    if (peek().type === TOK.IDENT && peek().value === "update") head = parseUpdateTail(head);
     return head;
+  }
+  // `<subject> update { case <bind?> at <path> -> <newExpr>, ... }`
+  // Path is a chain starting with `.IDENT` plus optional `[INT]` / further `.IDENT`s.
+  function parseUpdateTail(subject) {
+    const updateTok = tokens[p++]; // consume the "update" IDENT
+    eat(TOK.LBRACE);
+    const cases = [];
+    while (peek().type !== TOK.RBRACE) {
+      let bind = null;
+      // Either `case <ident> at <path> -> expr` (with binding) or
+      // `case <path> -> expr` (no binding).
+      if (peek().type === TOK.CASE) {
+        p++;
+      } else {
+        throw new Error(`Expected 'case' inside update block at line ${peek().line}:${peek().col}`);
+      }
+      // Lookahead: if next is IDENT followed by "at" (IDENT), it's a binding.
+      if (
+        peek().type === TOK.IDENT && peek().value !== "at" &&
+        tokens[p + 1] && tokens[p + 1].type === TOK.IDENT && tokens[p + 1].value === "at"
+      ) {
+        bind = tokens[p++].value;
+        p++; // consume "at"
+      }
+      // Parse the path: at least one `.field` step.
+      const path = parsePath();
+      eat(TOK.ARROW);
+      const result = parseExpr();
+      cases.push({ bind, path, result });
+    }
+    eat(TOK.RBRACE);
+    return { kind: "UpdateExpr", subject, cases, line: updateTok.line };
+  }
+  function parsePath() {
+    const steps = [];
+    if (peek().type !== TOK.DOT) {
+      throw new Error(`Expected '.' to start update path at line ${peek().line}:${peek().col}`);
+    }
+    while (peek().type === TOK.DOT || peek().type === TOK.LBRACK) {
+      if (peek().type === TOK.DOT) {
+        p++;
+        const t = peek();
+        if (!isFieldNameToken(t.type)) {
+          throw new Error(`Expected field name after '.' in path at line ${t.line}:${t.col}`);
+        }
+        steps.push({ kind: "field", name: String(t.value) });
+        p++;
+      } else {
+        p++;
+        const idx = parseExpr();
+        eat(TOK.RBRACK);
+        steps.push({ kind: "index", expr: idx });
+      }
+    }
+    return steps;
   }
   function parseIfElse() {
     const tok = eat(TOK.IF);
@@ -146,21 +270,42 @@ export function parse(tokens) {
   // Sits between IfElse/Match and Or so that `match` keyword (postfix) and
   // logical operators (Or/And) still bind correctly.
   //
-  // We exclude `to` from infix consideration: it's a *contextual* keyword used
-  // inside `arr[n to m]` (range selector). Without this exclusion, `0 to 2`
-  // inside the brackets would parse as a `to(0, 2)` function call, breaking
-  // range selection.
+  // We exclude *contextual* keywords from infix consideration:
+  //   - `to`      used inside `arr[n to m]` (range selector)
+  //   - `update`  used after a subject as a postfix operator
+  //   - `default` used as a low-precedence null-fallback operator
+  // Without these exclusions they'd parse as `to(0, 2)` / `update(payload, …)`
+  // / `default(x, y)` function calls and the real syntax would break.
   function parseInfix() {
-    let left = parseOr();
-    while (peek().type === TOK.IDENT && peek().value !== "to") {
+    let left = parseDefault();
+    while (
+      peek().type === TOK.IDENT &&
+      peek().value !== "to" &&
+      peek().value !== "update" &&
+      peek().value !== "default"
+    ) {
       const fnTok = tokens[p++];
-      const right = parseOr();
+      const right = parseDefault();
+      const callee = { kind: "Ident", name: fnTok.value, line: fnTok.line };
       left = {
         kind: "Call",
-        callee: { kind: "Ident", name: fnTok.value, line: fnTok.line },
-        args: wrapDollarArgs([left, right]),
+        callee,
+        args: wrapDollarArgs(callee, [left, right]),
         line: left.line ?? fnTok.line,
       };
+    }
+    return left;
+  }
+  // `default` — `lhs default rhs` returns rhs when lhs is null/missing.
+  // Right-associative so `a default b default c` is `a default (b default c)`.
+  // Sits below the infix-call rung so `payload.x map f default []` is read as
+  // `(payload.x map f) default []` (left side is the whole map call).
+  function parseDefault() {
+    const left = parseOr();
+    if (peek().type === TOK.IDENT && peek().value === "default") {
+      const tok = tokens[p++];
+      const right = parseDefault();
+      return { kind: "DefaultOp", left, right, line: left.line ?? tok.line };
     }
     return left;
   }
@@ -191,7 +336,7 @@ export function parse(tokens) {
   }
   function parseEquality() {
     let left = parseCompare();
-    while (peek().type === TOK.EQ || peek().type === TOK.NEQ) {
+    while (peek().type === TOK.EQ || peek().type === TOK.NEQ || peek().type === TOK.SIMILAR) {
       const op = tokens[p++].value;
       const right = parseCompare();
       left = { kind: "BinOp", op, left, right, line: left.line };
@@ -308,7 +453,7 @@ export function parse(tokens) {
           while (peek().type === TOK.COMMA) { p++; args.push(parseExpr()); }
         }
         eat(TOK.RPAREN);
-        node = { kind: "Call", callee: node, args: wrapDollarArgs(args), line: node.line };
+        node = { kind: "Call", callee: node, args: wrapDollarArgs(node, args), line: node.line };
       }
     }
     return node;
@@ -344,8 +489,15 @@ export function parse(tokens) {
     const params = ["$", "$$", "$$$"].slice(0, max);
     return { kind: "Lambda", params, body: arg, line: arg.line };
   }
-  function wrapDollarArgs(args) {
-    return args.map(wrapIfDollar);
+  function wrapDollarArgs(callee, args) {
+    // Only auto-wrap when calling a known built-in HOF — matches real DW,
+    // which rejects `$` references when the callee is a user-defined function.
+    // For non-built-in calls, dollar tokens stay as plain Idents and will
+    // throw at evaluation time as "Unknown identifier", same as real DW.
+    if (callee && callee.kind === "Ident" && KNOWN_HOFS.has(callee.name)) {
+      return args.map(wrapIfDollar);
+    }
+    return args;
   }
   // Speculative parse: if the next tokens form a lambda signature, consume
   // them and parse the body; otherwise rewind and return null so the caller
@@ -355,13 +507,20 @@ export function parse(tokens) {
     if (peek().type !== TOK.LPAREN) return null;
     const openTok = tokens[p++];
     const params = [];
+    const paramDefaults = [];
     if (peek().type !== TOK.RPAREN) {
       if (peek().type !== TOK.IDENT) { p = saved; return null; }
       params.push(tokens[p++].value);
+      // Optional `= defaultExpr`. parseExpr is recursive but the speculative
+      // lookahead is bounded by the next `,` / `)` so rewind stays correct.
+      if (peek().type === TOK.ASSIGN) { p++; paramDefaults.push(parseExpr()); }
+      else paramDefaults.push(null);
       while (peek().type === TOK.COMMA) {
         p++;
         if (peek().type !== TOK.IDENT) { p = saved; return null; }
         params.push(tokens[p++].value);
+        if (peek().type === TOK.ASSIGN) { p++; paramDefaults.push(parseExpr()); }
+        else paramDefaults.push(null);
       }
     }
     if (peek().type !== TOK.RPAREN) { p = saved; return null; }
@@ -369,7 +528,7 @@ export function parse(tokens) {
     if (peek().type !== TOK.ARROW) { p = saved; return null; }
     p++;
     const body = parseExpr();
-    return { kind: "Lambda", params, body, line: openTok.line };
+    return { kind: "Lambda", params, paramDefaults, body, line: openTok.line };
   }
   function parsePrimary() {
     const t = peek();
@@ -386,7 +545,18 @@ export function parse(tokens) {
       // A lambda's params are 0+ comma-separated IDENTs followed by `)` then `->`.
       const lambda = tryParseLambda();
       if (lambda) return lambda;
-      p++; const e = parseExpr(); eat(TOK.RPAREN); return e;
+      const openTok = tokens[p++];
+      const e = parseExpr();
+      // `(expr to expr)` standalone range literal — produces an inclusive
+      // array of numbers. `to` is contextual here just like inside `[…]`.
+      if (peek().type === TOK.IDENT && peek().value === "to") {
+        p++;
+        const endExpr = parseExpr();
+        eat(TOK.RPAREN);
+        return { kind: "RangeLit", start: e, end: endExpr, line: openTok.line };
+      }
+      eat(TOK.RPAREN);
+      return e;
     }
     if (t.type === TOK.LBRACE) return parseObject();
     if (t.type === TOK.LBRACK) return parseArray();
@@ -397,13 +567,25 @@ export function parse(tokens) {
     const fields = [];
     while (peek().type !== TOK.RBRACE) {
       const keyTok = peek();
-      let key;
-      if (isFieldNameToken(keyTok.type)) { key = String(tokens[p++].value); }
-      else if (keyTok.type === TOK.STR) key = tokens[p++].value;
-      else throw new Error(`Expected object key at line ${keyTok.line}`);
+      // Three forms: bare IDENT (or soft keyword), "string-literal", or
+      // (computed-expr) for dynamic keys.
+      let key = null;
+      let keyExpr = null;
+      const keyLine = keyTok.line;
+      if (keyTok.type === TOK.LPAREN) {
+        p++;
+        keyExpr = parseExpr();
+        eat(TOK.RPAREN);
+      } else if (isFieldNameToken(keyTok.type)) {
+        key = String(tokens[p++].value);
+      } else if (keyTok.type === TOK.STR) {
+        key = tokens[p++].value;
+      } else {
+        throw new Error(`Expected object key at line ${keyLine}`);
+      }
       eat(TOK.COLON);
       const value = parseExpr();
-      fields.push({ key, value, line: keyTok.line });
+      fields.push({ key, keyExpr, value, line: keyLine });
       if (peek().type === TOK.COMMA) p++;
     }
     eat(TOK.RBRACE);

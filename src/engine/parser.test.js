@@ -94,6 +94,20 @@ describe("parser", () => {
     expect(ast.body.end.value).toBe(2);
   });
 
+  test("parses standalone range literal `(n to m)`", () => {
+    const ast = parseSrc(`---\n(1 to 5)`);
+    expect(ast.body.kind).toBe("RangeLit");
+    expect(ast.body.start.value).toBe(1);
+    expect(ast.body.end.value).toBe(5);
+  });
+
+  test("range literal accepts arbitrary endpoint expressions", () => {
+    const ast = parseSrc(`---\n(payload.from to payload.to)`);
+    expect(ast.body.kind).toBe("RangeLit");
+    expect(ast.body.start.kind).toBe("Selector");
+    expect(ast.body.end.kind).toBe("Selector");
+  });
+
   test("parses multi-value selector `.*field`", () => {
     const ast = parseSrc(`---\npayload.*name`);
     expect(ast.body.kind).toBe("MultiValueSelector");
@@ -230,8 +244,8 @@ describe("parser", () => {
     expect(ast.body.args[1].name).toBe("c");
   });
 
-  test("auto-wraps `$` references in call args as Lambda", () => {
-    const ast = parseSrc(`---\napplyTo(5, $ * 2)`);
+  test("auto-wraps `$` references in args to built-in HOFs (filter / map / …)", () => {
+    const ast = parseSrc(`---\nfilter(arr, $ * 2)`);
     expect(ast.body.kind).toBe("Call");
     const arg = ast.body.args[1];
     expect(arg.kind).toBe("Lambda");
@@ -239,10 +253,19 @@ describe("parser", () => {
   });
 
   test("auto-wraps `$` and `$$` together, with the correct param count", () => {
-    const ast = parseSrc(`---\ncombine(2, 3, $ + $$)`);
-    const arg = ast.body.args[2];
+    const ast = parseSrc(`---\nreduce(arr, $ + $$)`);
+    const arg = ast.body.args[1];
     expect(arg.kind).toBe("Lambda");
     expect(arg.params).toEqual(["$", "$$"]);
+  });
+
+  test("does NOT auto-wrap `$` for user-defined callees (matches real DW)", () => {
+    // Real DataWeave restricts `$` syntax to built-in HOFs only. For arbitrary
+    // user functions it leaves `$` as a plain Ident, which will resolve at
+    // runtime as an "Unknown identifier" error — same as the real runtime.
+    const ast = parseSrc(`---\napplyTo(5, $ * 2)`);
+    const arg = ast.body.args[1];
+    expect(arg.kind).not.toBe("Lambda");
   });
 
   test("explicit lambdas are NOT auto-wrapped", () => {

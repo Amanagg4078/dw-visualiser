@@ -2,6 +2,7 @@ export const TOK = {
   NUM: "NUM", STR: "STR", BOOL: "BOOL", NULL: "NULL", IDENT: "IDENT",
   PLUS: "+", MINUS: "-", STAR: "*", SLASH: "/", CONCAT: "++",
   EQ: "==", NEQ: "!=", LT: "<", GT: ">", LTE: "<=", GTE: ">=",
+  SIMILAR: "~=",
   AND: "and", OR: "or", NOT: "not",
   IF: "if", ELSE: "else", FUN: "fun",
   MATCH: "match", CASE: "case",
@@ -112,6 +113,7 @@ export function tokenize(src) {
     if (c === "!" && peek(1) === "=") { advance(); advance(); push(TOK.NEQ, "!=", startLine, startCol); continue; }
     if (c === "<" && peek(1) === "=") { advance(); advance(); push(TOK.LTE, "<=", startLine, startCol); continue; }
     if (c === ">" && peek(1) === "=") { advance(); advance(); push(TOK.GTE, ">=", startLine, startCol); continue; }
+    if (c === "~" && peek(1) === "=") { advance(); advance(); push(TOK.SIMILAR, "~=", startLine, startCol); continue; }
     if (c === "." && peek(1) === "*") { advance(); advance(); push(TOK.DOT_STAR, ".*", startLine, startCol); continue; }
     if (c === "." && peek(1) === ".") { advance(); advance(); push(TOK.DOT_DOT,  "..", startLine, startCol); continue; }
     const single = { "+": TOK.PLUS, "-": TOK.MINUS, "*": TOK.STAR, "/": TOK.SLASH,

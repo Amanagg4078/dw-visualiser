@@ -161,6 +161,26 @@ var subtotal = payload.price * payload.qty
     expect(run(`---\npayload[3 to 0]`, "DataWeave").result).toBe("ataD");
   });
 
+  // ─── Standalone (n to m) range literal ───────────────────────────────
+  test("range literal `(1 to 5)` produces inclusive ascending array", () => {
+    expect(run(`---\n(1 to 5)`).result).toEqual([1, 2, 3, 4, 5]);
+  });
+  test("range literal reverses when start > end", () => {
+    expect(run(`---\n(5 to 1)`).result).toEqual([5, 4, 3, 2, 1]);
+  });
+  test("range literal single point produces a singleton array", () => {
+    expect(run(`---\n(3 to 3)`).result).toEqual([3]);
+  });
+  test("range literal endpoints can be arbitrary expressions", () => {
+    expect(run(`---\n(payload.lo to payload.hi)`, { lo: 2, hi: 4 }).result).toEqual([2, 3, 4]);
+  });
+  test("range literal emits a range-lit trace event", () => {
+    const { trace } = run(`---\n(1 to 3)`);
+    const e = trace.find((t) => t.phase === "range-lit");
+    expect(e).toBeTruthy();
+    expect(e.value).toEqual([1, 2, 3]);
+  });
+
   // ─── 3.4 Multi-Value Selector ────────────────────────────────────────
   test("multi-value selector collects field from each element of an array", () => {
     const { result } = run(`---\npayload.users.*name`, {
@@ -233,17 +253,137 @@ var subtotal = payload.price * payload.qty
   });
 
   // ─── 6.5 $ / $$ / $$$ implicit params ────────────────────────────────
-  test("`$` inside a call arg auto-wraps as a one-param lambda", () => {
+  // Real DataWeave only enables the dollar-sign sugar for *built-in* HOFs,
+  // not user-defined ones. Our parser whitelists `filter` / `map` / `reduce`
+  // / `filterObject` / `mapObject` / etc. — any other callee leaves `$` as
+  // an unresolved identifier (same behaviour as the real runtime).
+  test("`$` inside a `filter` arg auto-wraps as a one-param lambda", () => {
+    expect(run(`---\npayload filter ($ > 3)`, [1, 2, 3, 4, 5]).result).toEqual([4, 5]);
+  });
+  test("`$.field` works inside filter (selector on implicit param)", () => {
+    const { result } = run(
+      `---\npayload filter ($.role == "admin")`,
+      [{ name: "A", role: "admin" }, { name: "B", role: "user" }, { name: "C", role: "admin" }]
+    );
+    expect(result).toEqual([{ name: "A", role: "admin" }, { name: "C", role: "admin" }]);
+  });
+  test("`$` is NOT auto-wrapped for user-defined callees (matches real DW)", () => {
+    // Real DW: "Unable to resolve reference of: `$`."
     const src = `fun applyTo(arg, f) = f(arg)\n---\n10 applyTo ($ * 2)`;
-    expect(run(src, {}).result).toBe(20);
+    expect(() => run(src, {})).toThrow(/Unknown identifier: \$/);
   });
-  test("`$` and `$$` together auto-wrap as a two-param lambda", () => {
-    const src = `fun combine(a, b, f) = f(a, b)\n---\ncombine(2, 3, $ + $$)`;
-    expect(run(src, {}).result).toBe(5);
+
+  // ─── 7.1 filter (first built-in) ─────────────────────────────────────
+  test("filter built-in: prefix call with explicit lambda", () => {
+    const src = `---\nfilter(payload, (n, idx) -> n > 2)`;
+    expect(run(src, [1, 2, 3, 4]).result).toEqual([3, 4]);
   });
-  test("`$.field` works with auto-wrap (selector inside implicit lambda)", () => {
-    const src = `fun applyTo(arg, f) = f(arg)\n---\napplyTo(payload, $.name)`;
-    expect(run(src, { name: "Alice" }).result).toBe("Alice");
+  test("filter built-in: infix call", () => {
+    expect(run(`---\npayload filter ((n, idx) -> n > 2)`, [1, 2, 3, 4]).result).toEqual([3, 4]);
+  });
+  test("filter on null returns null", () => {
+    expect(run(`---\npayload filter ($ > 0)`, null).result).toBe(null);
+  });
+
+  // ─── 7.2 map ─────────────────────────────────────────────────────────
+  test("map applies the lambda to every element", () => {
+    expect(run(`---\npayload map ($ * 2)`, [1, 2, 3]).result).toEqual([2, 4, 6]);
+  });
+  test("map exposes the index as the second lambda param", () => {
+    const { result } = run(`---\npayload map ((n, idx) -> { i: idx, v: n })`, ["a", "b"]);
+    expect(result).toEqual([{ i: 0, v: "a" }, { i: 1, v: "b" }]);
+  });
+
+  // ─── 7.3 distinctBy ──────────────────────────────────────────────────
+  test("distinctBy on primitives — `distinctBy $` returns each unique item once", () => {
+    expect(run(`---\npayload distinctBy $`, [1, 2, 3, 2, 1]).result).toEqual([1, 2, 3]);
+  });
+  test("distinctBy by object field keeps the first occurrence", () => {
+    const { result } = run(
+      `---\npayload distinctBy $.id`,
+      [{ id: "A", v: 1 }, { id: "B", v: 2 }, { id: "A", v: 99 }]
+    );
+    expect(result).toEqual([{ id: "A", v: 1 }, { id: "B", v: 2 }]);
+  });
+
+  // ─── 7.4 groupBy ─────────────────────────────────────────────────────
+  test("groupBy returns an object keyed by the lambda result", () => {
+    const { result } = run(`---\npayload groupBy $.k`, [{ k: "x", v: 1 }, { k: "y", v: 2 }, { k: "x", v: 3 }]);
+    expect(result).toEqual({ x: [{ k: "x", v: 1 }, { k: "x", v: 3 }], y: [{ k: "y", v: 2 }] });
+  });
+  test("groupBy with boolean keys coerces to `\"true\"` / `\"false\"`", () => {
+    const { result } = run(`---\npayload groupBy ($ > 2)`, [1, 2, 3, 4]);
+    expect(result).toEqual({ false: [1, 2], true: [3, 4] });
+  });
+
+  // ─── 7.5 reduce ──────────────────────────────────────────────────────
+  test("reduce without an accumulator default seeds from arr[0] and iterates from idx 1", () => {
+    expect(run(`---\npayload reduce ((n, t) -> t + n)`, [1, 2, 3, 4, 5]).result).toBe(15);
+  });
+  test("reduce with an accumulator default iterates over all items", () => {
+    expect(run(`---\npayload reduce ((n, t = 1000) -> t + n)`, [1, 2, 3, 4, 5]).result).toBe(1015);
+  });
+  test("reduce can build any type — including the running max", () => {
+    expect(run(`---\npayload reduce ((n, m) -> if (n > m) n else m)`, [3, 1, 7, 5]).result).toBe(7);
+  });
+  test("reduce on an empty array with no default returns null", () => {
+    expect(run(`---\npayload reduce ((n, t) -> t + n)`, []).result).toBe(null);
+  });
+
+  // ─── 8.1 filterObject ────────────────────────────────────────────────
+  test("filterObject keeps entries where the lambda returns truthy", () => {
+    const { result } = run(`---\npayload filterObject ((v, k, idx) -> v > 10)`, { a: 5, b: 20, c: 30 });
+    expect(result).toEqual({ b: 20, c: 30 });
+  });
+  test("filterObject lambda receives (value, key, index)", () => {
+    const { result } = run(`---\npayload filterObject ((v, k, idx) -> idx >= 1)`, { a: 1, b: 2, c: 3 });
+    expect(result).toEqual({ b: 2, c: 3 });
+  });
+
+  // ─── 8.2 mapObject + dynamic keys ────────────────────────────────────
+  test("mapObject + dynamic keys rename every key", () => {
+    const { result } = run(`---\npayload mapObject ((v, k, idx) -> { (upper(k)): v })`, { a: 1, b: 2 });
+    expect(result).toEqual({ A: 1, B: 2 });
+  });
+  test("mapObject can transform values while keeping keys", () => {
+    const { result } = run(`---\npayload mapObject ((v, k, idx) -> { (k): v * 10 })`, { a: 1, b: 2 });
+    expect(result).toEqual({ a: 10, b: 20 });
+  });
+
+  // ─── 8.3 pluck ───────────────────────────────────────────────────────
+  test("pluck → array of values", () => {
+    expect(run(`---\npayload pluck ((v, k, idx) -> v)`, { a: 1, b: 2, c: 3 }).result).toEqual([1, 2, 3]);
+  });
+  test("pluck → array of single-pair objects (canonical)", () => {
+    expect(run(`---\npayload pluck ((v, k, idx) -> { (k): v })`, { a: 1, b: 2 }).result)
+      .toEqual([{ a: 1 }, { b: 2 }]);
+  });
+
+  // ─── 8.4 update ──────────────────────────────────────────────────────
+  test("update with a single case replaces just that field", () => {
+    const { result } = run(`---\npayload update { case n at .age -> n + 1 }`, { name: "A", age: 10 });
+    expect(result).toEqual({ name: "A", age: 11 });
+  });
+  test("update applies multiple cases in order", () => {
+    const src = `---\npayload update {
+      case n at .firstName -> upper(n)
+      case a at .age -> a * 2
+    }`;
+    expect(run(src, { firstName: "abc", age: 5 }).result).toEqual({ firstName: "ABC", age: 10 });
+  });
+  test("update does not mutate the original payload", () => {
+    const orig = { age: 10 };
+    run(`---\npayload update { case n at .age -> n + 1 }`, orig);
+    expect(orig.age).toBe(10);
+  });
+
+  // ─── helpers (upper, lower, sizeOf) ──────────────────────────────────
+  test("upper / lower / sizeOf built-ins", () => {
+    expect(run(`---\nupper("hello")`, {}).result).toBe("HELLO");
+    expect(run(`---\nlower("HELLO")`, {}).result).toBe("hello");
+    expect(run(`---\nsizeOf([1,2,3])`, {}).result).toBe(3);
+    expect(run(`---\nsizeOf("hello")`, {}).result).toBe(5);
+    expect(run(`---\nsizeOf({ a: 1, b: 2 })`, {}).result).toBe(2);
   });
 
   // ─── 5.1 If / Else ───────────────────────────────────────────────────

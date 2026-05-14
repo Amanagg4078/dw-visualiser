@@ -1194,45 +1194,50 @@ var addFive = makeAdder(5)
     chapter: "6.4",
     title: "Infix Notation",
     description:
-      "Any two-argument function can be called in **infix** position: `arg1 fnName arg2` is exactly the same as `fnName(arg1, arg2)`. It reads more like English and chains cleanly. (The tutorial uses `filter` for the examples; we'll revisit those once Chapter 7 ships. For now we demonstrate the syntax with hand-rolled helpers.)",
+      "Any two-argument function can be called in **infix** position: `arg1 fnName arg2` is exactly the same as `fnName(arg1, arg2)`. It reads more like English and chains cleanly. The tutorial uses `filter` (our first built-in) to show this off — try both the prefix and infix forms below.",
     tutorialUrl: "https://dataweave.mulesoft.com/learn/tutorial/6.4-Infix_notation",
     script: `%dw 2.0
 output application/json
 fun add(a, b) = a + b
-fun applyTo(arg, f) = f(arg)
 ---
 {
-  prefix:    add(2, 3),
-  infix:     2 add 3,
-  chained:   10 applyTo ((x) -> x + 1) applyTo ((x) -> x * 2),
-  withLogic: payload.score applyTo ((s) -> if (s >= 80) "pass" else "fail")
+  prefixUserFn:   add(2, 3),
+  infixUserFn:    2 add 3,
+  prefixBuiltin:  filter(payload.numbers, (n, idx) -> n > 5),
+  infixBuiltin:   payload.numbers filter ((n, idx) -> n > 5),
+  chained:        payload.numbers filter ((n, idx) -> n > 2) filter ((n, idx) -> n < 10)
 }`,
-    payload: { score: 85 },
+    payload: { numbers: [1, 3, 5, 7, 9, 11] },
     annotations: [
       {
-        lineRange: [1, 4],
-        title: "Header + two helpers",
-        body: "`add(a, b)` is a plain binary function. `applyTo(arg, f)` is a one-shot higher-order helper — passes `arg` into `f`. Both are eligible for infix calls.",
+        lineRange: [1, 3],
+        title: "Header + a tiny user function",
+        body: "`add(a, b)` is a plain binary function — written `fun`. We'll use it to show that **user** functions support infix too. The built-in HOFs (`filter` and friends) follow the same rule.",
+      },
+      {
+        lineRange: [5, 5],
+        title: "Standard prefix call (user-defined function)",
+        body: "`add(2, 3)` — the classical function-first form. Works for any function whose definition is visible.",
       },
       {
         lineRange: [6, 6],
-        title: "Standard prefix call",
-        body: "`add(2, 3)` — the way you've been calling functions all along. Reads function-first.",
+        title: "Infix call — same function, different shape",
+        body: "`2 add 3` is **identical** to `add(2, 3)`. The function name sits *between* its two arguments. Pure syntax sugar — same `Call` AST node, same evaluation. Works for user-defined and built-in two-argument functions alike.",
       },
       {
         lineRange: [7, 7],
-        title: "Infix call — same function, different shape",
-        body: "`2 add 3` is **identical** to `add(2, 3)`. The function name sits *between* its two arguments. It's pure syntax sugar — same `Call` AST node, same evaluation.",
+        title: "Prefix form on the built-in `filter`",
+        body: "`filter(array, lambda)` — the standard way to call any built-in. `filter` keeps every element for which the lambda returns truthy.",
       },
       {
         lineRange: [8, 8],
-        title: "Chained infix is left-associative",
-        body: "`10 applyTo A applyTo B` parses as `(10 applyTo A) applyTo B` — apply `A` to 10, then apply `B` to the result. Reads naturally left-to-right, like a pipeline.",
+        title: "Infix form on `filter` — the canonical DW style",
+        body: "`payload.numbers filter ((n, idx) -> n > 5)` reads top-to-bottom: \"take the numbers, then filter them where n > 5\". This is how DW scripts usually look. Parens around the lambda help the parser see where it ends.",
       },
       {
         lineRange: [9, 9],
-        title: "Infix mixes with everything else",
-        body: "The second argument is any expression — here a lambda containing an `if/else`. Parens around the lambda are important so the parser knows where it ends.",
+        title: "Chained infix is left-associative",
+        body: "`A filter F1 filter F2` parses as `(A filter F1) filter F2` — filter, then filter again. Reads naturally left-to-right, like a pipeline. Real-world DW scripts chain `filter`, `map`, `groupBy`, etc. this way.",
       },
     ],
   },
@@ -1242,52 +1247,516 @@ fun applyTo(arg, f) = f(arg)
     chapter: "6.5",
     title: "`$`, `$$`, `$$$` Implicit Params",
     description:
-      "When a function argument uses `$` (or `$$`, `$$$`), it's automatically wrapped as a lambda whose params are positional: `$` is the first param, `$$` the second, `$$$` the third. Lets you write tiny one-shot lambdas without naming the params at all.",
+      "When you pass a lambda to a **built-in** higher-order function like `filter`, `map`, or `reduce`, you can skip naming the params and use `$` (first), `$$` (second), or `$$$` (third) directly. The parser auto-wraps the expression as a lambda. **Important:** real DataWeave only enables this sugar for built-in HOFs — for your own functions you have to declare params explicitly.",
     tutorialUrl: "https://dataweave.mulesoft.com/learn/tutorial/6.5-$,-$$,-$$$-syntax",
     script: `%dw 2.0
 output application/json
-fun applyTo(arg, f) = f(arg)
-fun combine(a, b, f) = f(a, b)
-fun triple(a, b, c, f) = f(a, b, c)
 ---
 {
-  doubled:    10 applyTo ($ * 2),
-  fieldOnly:  payload applyTo $.name,
-  added:      combine(2, 3, $ + $$),
-  product:    triple(2, 3, 4, $ * $$ * $$$),
-  explicit:   10 applyTo ((x) -> x + 100)
+  bigNumbers:  payload.numbers filter ($ > 5),
+  inRange:     payload.numbers filter ($ > 2 and $ < 10),
+  admins:      payload.users filter ($.role == "admin"),
+  pricy:       payload.items filter ($.price > 50),
+  byIndex:     payload.numbers filter ($$ > 0),
+  explicit:    payload.numbers filter ((n, idx) -> n > 5)
 }`,
-    payload: { name: "Aman" },
+    payload: {
+      numbers: [1, 3, 5, 7, 9, 11],
+      users: [
+        { name: "Alice", role: "admin" },
+        { name: "Bob",   role: "user" },
+        { name: "Carol", role: "admin" },
+      ],
+      items: [
+        { name: "pen",    price: 2 },
+        { name: "laptop", price: 800 },
+        { name: "mouse",  price: 25 },
+      ],
+    },
     annotations: [
       {
-        lineRange: [1, 5],
-        title: "Header + helpers (taking 1, 2, 3 args)",
-        body: "Three small higher-order helpers — each takes a function with a different arity. The lessons below show how `$`, `$$`, `$$$` line up with first, second, third params.",
+        lineRange: [1, 3],
+        title: "Standard header",
+        body: "No vars or funs this time — the body uses `filter`, one of DataWeave's built-in higher-order functions. Built-ins are what unlock the `$` syntax.",
+      },
+      {
+        lineRange: [5, 5],
+        title: "`$` is the lambda's first param",
+        body: "`payload.numbers filter ($ > 5)` is shorthand for `payload.numbers filter (($, $$) -> $ > 5)`, which is the same as `filter(payload.numbers, ($) -> $ > 5)`. The parser sees `$` in the arg to `filter` and auto-wraps it. The result: every number greater than 5.",
+      },
+      {
+        lineRange: [6, 6],
+        title: "Combine `$` with operators",
+        body: "Whatever uses `$` becomes the lambda body. Arithmetic, comparison, logical (`and` / `or` / `not`), even nested expressions — they all work because `$` is just a name for the lambda's first parameter.",
       },
       {
         lineRange: [7, 7],
-        title: "`$` = the first (and only) param",
-        body: "`10 applyTo ($ * 2)` is shorthand for `10 applyTo (($) -> $ * 2)`, which is the same as `applyTo(10, ($) -> $ * 2)`. The parser sees `$` in the arg, auto-wraps it as a one-param lambda. Result: `20`.",
+        title: "`$.field` — selectors on the implicit param",
+        body: "When filtering an array of objects, `$.role` reaches into each element. This is the canonical pattern for narrowing structured data: `payload.users filter ($.role == \"admin\")`.",
       },
       {
         lineRange: [8, 8],
-        title: "`$` works with selectors and other operators",
-        body: "`$.name` reaches into the implicit lambda's argument. `payload applyTo $.name` returns `payload.name`. You can do `$ + 1`, `$ > 5`, `$ ++ \"x\"` — anything that uses `$` becomes a lambda body.",
+        title: "Chained selectors and any other expression",
+        body: "Anything you can write in a lambda body can use `$`. Numbers, strings, deep selector chains — all fair game.",
       },
       {
         lineRange: [9, 9],
-        title: "`$$` is the second param",
-        body: "`combine(2, 3, $ + $$)` auto-wraps as `combine(2, 3, ($, $$) -> $ + $$)`. The parser detects that the highest dollar used is `$$`, so it makes a two-param lambda. Result: `5`.",
+        title: "`$$` is the lambda's second param",
+        body: "`filter`'s lambda receives `(item, index)`. `$$` is the index. Less common in practice than `$`, but useful for index-based filtering. `$$$` would be the third param — relevant for higher-arity HOFs like `reduce` which receives `(acc, item, index)`.",
       },
       {
         lineRange: [10, 10],
-        title: "`$$$` is the third — same pattern scales",
-        body: "Three params, three dollars. Beyond three, you'd switch to explicit `(a, b, c, d) -> …` syntax.",
+        title: "Explicit lambdas always work too",
+        body: "`(n, idx) -> n > 5` is the long form — name the params explicitly. The `$` form is just sugar. Use whichever reads better; for tiny lambdas `$` wins, for longer bodies named params are clearer.",
+      },
+    ],
+  },
+
+  // ─── Chapter 7: Working with Arrays ────────────────────────────────────
+  {
+    id: "7.1-filter",
+    chapter: "7.1",
+    title: "filter",
+    description:
+      "`filter` keeps every item for which the predicate lambda returns truthy. Signature: `filter(Array<T>, (T, Number) -> Boolean): Array<T>` — the lambda receives the item and its index. Use prefix `filter(arr, …)` or infix `arr filter (…)`; both are identical.",
+    tutorialUrl: "https://dataweave.mulesoft.com/learn/tutorial/7.1-filter",
+    script: `%dw 2.0
+output application/json
+---
+{
+  bigNumbers:  payload.numbers filter ($ > 50),
+  inStock:     payload.products filter ($.stock > 0),
+  expensive:   payload.products filter ($.price >= 100),
+  affordable:  payload.products filter ($.price < 50 and $.stock > 0),
+  byCategory:  payload.products filter ((p, idx) -> p.category == "books")
+}`,
+    payload: {
+      numbers: [10, 50, 75, 100, 25],
+      products: [
+        { id: 1, name: "Pen",      price: 2,   stock: 100, category: "stationery" },
+        { id: 2, name: "Laptop",   price: 999, stock: 5,   category: "electronics" },
+        { id: 3, name: "Book",     price: 20,  stock: 0,   category: "books" },
+        { id: 4, name: "Mouse",    price: 25,  stock: 50,  category: "electronics" },
+        { id: 5, name: "Notebook", price: 8,   stock: 200, category: "stationery" },
+      ],
+    },
+    annotations: [
+      {
+        lineRange: [1, 3],
+        title: "Standard header",
+        body: "`%dw` + `output` + `---`. The body uses `filter` — one of the most common built-ins.",
       },
       {
-        lineRange: [11, 11],
-        title: "Explicit lambdas still work, of course",
-        body: "If you'd rather name the params, just write `(x) -> x + 100`. The `$` form is a convenience, not a replacement.",
+        lineRange: [5, 5],
+        title: "Filtering primitives with `$`",
+        body: "`payload.numbers filter ($ > 50)` keeps every number greater than 50. Because `filter` is a built-in HOF, the `$` shorthand stands in for the lambda's first param (the current item). Real DW restricts `$` to built-ins — for your own functions you'd write `(n) -> n > 50` explicitly.",
+      },
+      {
+        lineRange: [6, 6],
+        title: "Filtering objects with `$.field`",
+        body: "`$.stock > 0` reaches into each object. This is the canonical pattern for narrowing structured data — keep rows where some field meets a condition.",
+      },
+      {
+        lineRange: [7, 8],
+        title: "Combining conditions",
+        body: "Any boolean expression works as the predicate. Use `and` / `or` / `not`, comparison operators (`<`, `>=`, `==`, `!=`, etc.), or anything that returns a Boolean.",
+      },
+      {
+        lineRange: [9, 9],
+        title: "Explicit (named) lambda",
+        body: "`(p, idx) -> p.category == \"books\"` is the long form. Names the item `p` and the index `idx`. Use this when the body is non-trivial or when reading clarity matters more than brevity.",
+      },
+    ],
+  },
+
+  {
+    id: "7.2-map",
+    chapter: "7.2",
+    title: "map",
+    description:
+      "`map` transforms every item in an array — output array length equals input length. Signature: `map(Array<T>, (T, Number) -> R): Array<R>`. The most common use case in integration code: reshape every record from one structure to another.",
+    tutorialUrl: "https://dataweave.mulesoft.com/learn/tutorial/7.2-map",
+    script: `%dw 2.0
+output application/json
+---
+{
+  doubled:    payload.numbers map ($ * 2),
+  withIndex:  payload.numbers map ((n, idx) -> { index: idx, value: n, doubled: n * 2 }),
+  names:      payload.products map ($.name),
+  labels:     payload.products map ((p, idx) -> p.name ++ " - USD " ++ p.price),
+  reshaped:   payload.products map ((p, idx) -> { id: p.id, available: p.stock > 0 })
+}`,
+    payload: {
+      numbers: [1, 2, 3, 4, 5],
+      products: [
+        { id: 1, name: "Pen",   price: 2,  stock: 100 },
+        { id: 2, name: "Mouse", price: 25, stock: 50 },
+      ],
+    },
+    annotations: [
+      {
+        lineRange: [1, 3],
+        title: "Standard header",
+        body: "Body uses `map` — applies a transformation to every element.",
+      },
+      {
+        lineRange: [5, 5],
+        title: "Transform each element with `$`",
+        body: "`payload.numbers map ($ * 2)` produces `[2, 4, 6, 8, 10]`. Output array length always matches input — `map` never adds or removes elements, only transforms them.",
+      },
+      {
+        lineRange: [6, 6],
+        title: "Use the index too",
+        body: "The lambda receives `(item, index)`. Naming both lets you build per-position structures — useful when the index itself matters (numbering, alternating styles, etc.).",
+      },
+      {
+        lineRange: [7, 7],
+        title: "Project a single field",
+        body: "`map ($.name)` pulls just the `name` field from each object — common pattern, like SQL's `SELECT name FROM …`.",
+      },
+      {
+        lineRange: [8, 8],
+        title: "Build new strings",
+        body: "Use `++` to concatenate. DataWeave coerces non-strings to strings during concat, so `p.price` (a number) joins cleanly.",
+      },
+      {
+        lineRange: [9, 9],
+        title: "Reshape into different objects",
+        body: "Drop fields, rename them, derive new ones — `map` is the workhorse for restructuring records. Anything the lambda returns becomes the next element.",
+      },
+    ],
+  },
+
+  {
+    id: "7.3-distinctBy",
+    chapter: "7.3",
+    title: "distinctBy",
+    description:
+      "`distinctBy` removes duplicates, where \"duplicate\" is determined by the value the lambda returns for each item. Signature: `distinctBy(Array<T>, (T, Number) -> Any): Array<T>`. The first occurrence of each unique key is kept; later duplicates are dropped.",
+    tutorialUrl: "https://dataweave.mulesoft.com/learn/tutorial/7.3-distinct_by",
+    script: `%dw 2.0
+output application/json
+---
+{
+  uniqueNumbers: payload.numbers distinctBy $,
+  uniqueOrders:  payload.orders distinctBy $.id,
+  uniqueByPair:  payload.lines distinctBy ($.orderId ++ "-" ++ $.lineId)
+}`,
+    payload: {
+      numbers: [1, 2, 3, 2, 1, 4, 5, 3],
+      orders: [
+        { id: "A", qty: 5 },
+        { id: "B", qty: 3 },
+        { id: "A", qty: 9 },
+        { id: "C", qty: 1 },
+      ],
+      lines: [
+        { orderId: "1", lineId: "1", product: "toothpaste" },
+        { orderId: "1", lineId: "2", product: "floss" },
+        { orderId: "2", lineId: "3", product: "toothbrush" },
+        { orderId: "2", lineId: "4", product: "mouth wash" },
+        { orderId: "2", lineId: "4", product: "mouth wash" },
+      ],
+    },
+    annotations: [
+      {
+        lineRange: [1, 3],
+        title: "Standard header",
+        body: "Body uses `distinctBy` to drop duplicate items.",
+      },
+      {
+        lineRange: [5, 5],
+        title: "Deduplicate primitives",
+        body: "`payload.numbers distinctBy $` returns `[1, 2, 3, 4, 5]`. The lambda just returns each item — the item itself is the uniqueness key. First occurrence wins; later duplicates are dropped.",
+      },
+      {
+        lineRange: [6, 6],
+        title: "Deduplicate objects by a field",
+        body: "`payload.orders distinctBy $.id` keeps the first order with each id. The lambda returns the key to compare by — here, the `id` field. The earlier `{ id: \"A\", qty: 5 }` survives; the later `{ id: \"A\", qty: 9 }` is dropped.",
+      },
+      {
+        lineRange: [7, 7],
+        title: "Compound keys",
+        body: "Concatenate multiple fields with `++` to make a compound uniqueness key. `$.orderId ++ \"-\" ++ $.lineId` treats the pair `(orderId, lineId)` as one unit. Useful when no single field is unique on its own.",
+      },
+    ],
+  },
+
+  {
+    id: "7.4-groupBy",
+    chapter: "7.4",
+    title: "groupBy",
+    description:
+      "`groupBy` partitions an array into an **object** whose keys are the group labels returned by the lambda, and whose values are arrays of the matching items. Signature: `groupBy(Array<T>, (T, Number) -> R): Object<Key, Array<T>>`. Unlike `filter`/`map`/etc., the output is an Object — keys are coerced to the string-like `Key` type.",
+    tutorialUrl: "https://dataweave.mulesoft.com/learn/tutorial/7.4-group_by",
+    script: `%dw 2.0
+output application/json
+---
+{
+  byCategory: payload.products groupBy $.category,
+  byStock:    payload.products groupBy ($.stock > 0),
+  byBucket:   payload.numbers groupBy (
+                if ($ < 10) "small"
+                else if ($ < 100) "medium"
+                else "big"
+              )
+}`,
+    payload: {
+      products: [
+        { name: "Pen",      category: "stationery", stock: 100 },
+        { name: "Laptop",   category: "electronics", stock: 5 },
+        { name: "Book",     category: "books", stock: 0 },
+        { name: "Mouse",    category: "electronics", stock: 50 },
+        { name: "Notebook", category: "stationery", stock: 200 },
+      ],
+      numbers: [5, 25, 150, 8, 50, 99, 200],
+    },
+    annotations: [
+      {
+        lineRange: [1, 3],
+        title: "Standard header",
+        body: "Body uses `groupBy` to bucket items.",
+      },
+      {
+        lineRange: [5, 5],
+        title: "Group by a string field",
+        body: "`payload.products groupBy $.category` returns an object whose keys are the category names (`stationery`, `electronics`, `books`) and whose values are arrays of products in each. The output is an **Object**, not an Array — that's `groupBy`'s defining feature.",
+      },
+      {
+        lineRange: [6, 6],
+        title: "Group by a boolean",
+        body: "`$.stock > 0` produces `true` or `false`, so the result has two keys: `\"true\"` (in stock) and `\"false\"` (out of stock). Keys are always coerced to a string-like `Key` type — even booleans show up as `\"true\"`/`\"false\"` in JSON output.",
+      },
+      {
+        lineRange: [7, 11],
+        title: "Group by a derived label",
+        body: "The lambda can compute any key — including via `if`/`else`. Here we bucket numbers into `small`/`medium`/`big` ranges. As long as two items produce the same key, they end up in the same group.",
+      },
+    ],
+  },
+
+  {
+    id: "7.5-reduce",
+    chapter: "7.5",
+    title: "reduce",
+    description:
+      "`reduce` folds an array into a single value. It's the general-purpose looping tool — `filter`, `map`, `distinctBy`, even `groupBy` can all be expressed in terms of `reduce`. Signature: `reduce(Array<T>, (T, R) -> R): R`. Lambda signature is `(item, accumulator) -> newAccumulator` — note the second param is the accumulator, **not** the index.",
+    tutorialUrl: "https://dataweave.mulesoft.com/learn/tutorial/7.5-reduce",
+    script: `%dw 2.0
+output application/json
+---
+{
+  sum:           payload.numbers reduce ((n, total) -> total + n),
+  sumWithStart:  payload.numbers reduce ((n, total = 1000) -> total + n),
+  product:       payload.numbers reduce ((n, prod) -> prod * n),
+  max:           payload.numbers reduce ((n, biggest) -> if (n > biggest) n else biggest),
+  joined:        payload.words reduce ((w, acc = "Words: ") -> acc ++ w ++ " ")
+}`,
+    payload: { numbers: [1, 2, 3, 4, 5], words: ["hello", "world"] },
+    annotations: [
+      {
+        lineRange: [1, 3],
+        title: "Standard header",
+        body: "Body uses `reduce`. Each line shows a different reduction pattern.",
+      },
+      {
+        lineRange: [5, 5],
+        title: "Sum without an initial value",
+        body: "`reduce ((n, total) -> total + n)` — no default for `total`. DataWeave seeds the accumulator with the **first item** of the array and starts iterating from index 1. So `[1,2,3,4,5]` reduces as `((((1+2)+3)+4)+5) = 15`.",
+      },
+      {
+        lineRange: [6, 6],
+        title: "Sum with a starting accumulator",
+        body: "`(n, total = 1000) -> total + n` — the `= 1000` declares an initial value for the accumulator. When the accumulator has a default, `reduce` iterates over **all** items (starting at index 0). So this returns `1000 + 1 + 2 + 3 + 4 + 5 = 1015`.",
+      },
+      {
+        lineRange: [7, 7],
+        title: "Product — same shape, different operator",
+        body: "Replace `+` with `*`. `[1,2,3,4,5]` reduces to `1*2*3*4*5 = 120`. Any binary operation that folds left-to-right works here.",
+      },
+      {
+        lineRange: [8, 8],
+        title: "Max — accumulator carries the best-so-far",
+        body: "The accumulator doesn't have to be a sum — it can hold any value. Here `biggest` tracks the largest seen so far; the lambda's `if` updates it only when the current item beats it.",
+      },
+      {
+        lineRange: [9, 9],
+        title: "String concatenation with a default",
+        body: "Accumulator types are unrestricted. Starting with `\"Words: \"`, each iteration appends a word. The default value seeds the prefix; without it, the first word would be the prefix.",
+      },
+    ],
+  },
+
+  // ─── Chapter 8: Working with Objects ───────────────────────────────────
+  {
+    id: "8.1-filterObject",
+    chapter: "8.1",
+    title: "filterObject",
+    description:
+      "`filterObject` is to objects what `filter` is to arrays — it keeps key-value pairs where the lambda returns truthy. Signature: `filterObject(Object<K,V>, (V, K, Number) -> Boolean): Object<K,V>`. The lambda takes **three** params: value, key, and index (yes, DataWeave gives keys a deterministic order so the index makes sense).",
+    tutorialUrl: "https://dataweave.mulesoft.com/learn/tutorial/8.1-filter_object",
+    script: `%dw 2.0
+output application/json
+---
+{
+  highIdx:     payload filterObject ((v, k, idx) -> idx >= 2),
+  truthyOnly:  payload filterObject ((v, k, idx) -> v != null and v != false),
+  matchValues: payload filterObject ((v, k, idx) -> v == 30 or v == 85)
+}`,
+    payload: { name: "Aman", age: 30, city: "NYC", verified: true, score: 85 },
+    annotations: [
+      {
+        lineRange: [1, 3],
+        title: "Standard header",
+        body: "Body uses `filterObject`. The payload has mixed value types so the predicates can show off a few different patterns.",
+      },
+      {
+        lineRange: [5, 5],
+        title: "Filter by index",
+        body: "`(v, k, idx) -> idx >= 2` keeps every entry from the third one onward (index 2). DataWeave maintains key insertion order, so positions are stable — `name` is at 0, `age` at 1, `city` at 2, and so on.",
+      },
+      {
+        lineRange: [6, 6],
+        title: "Filter by value",
+        body: "`v != null and v != false` keeps every entry whose value isn't `null` or `false`. The lambda receives the value as its first arg — same shape as `filter`'s `(item, idx)` but with the extra `key` parameter wedged in the middle.",
+      },
+      {
+        lineRange: [7, 7],
+        title: "Multi-condition predicate",
+        body: "Any boolean expression works as the predicate. Match exact values, ranges, or types — anything you can write as a Boolean.",
+      },
+    ],
+  },
+
+  {
+    id: "8.2-mapObject",
+    chapter: "8.2",
+    title: "mapObject",
+    description:
+      "`mapObject` transforms every key-value pair in an Object into a new key-value pair. Signature: `mapObject(Object<K,V>, (V, K, Number) -> Object): Object`. The lambda returns a **single-pair object** each iteration; mapObject merges them all into the result. Dynamic keys (`{ (expr): value }`) are essential here — that's how you rename keys.",
+    tutorialUrl: "https://dataweave.mulesoft.com/learn/tutorial/8.2-map_object",
+    script: `%dw 2.0
+output application/json
+---
+{
+  upperKeys: payload mapObject ((v, k, idx) -> { (upper(k)): v }),
+  prefixed:  payload mapObject ((v, k, idx) -> { ("field_" ++ k): v }),
+  rotated:   payload mapObject ((v, k, idx) -> { (k): "<<" ++ v ++ ">>" })
+}`,
+    payload: { firstName: "Avery", lastName: "Chance", age: 56, occupation: "Physicist" },
+    annotations: [
+      {
+        lineRange: [1, 3],
+        title: "Standard header",
+        body: "Body uses `mapObject` three times to demonstrate key renaming, key prefixing, and value transformation.",
+      },
+      {
+        lineRange: [5, 5],
+        title: "Rename keys — uppercase them",
+        body: "`{ (upper(k)): v }` is the canonical pattern. The parens around `upper(k)` make it a **dynamic key** — the expression's result becomes the key string. `upper` is a built-in that uppercases strings. Result: `firstName` → `FIRSTNAME`, etc.",
+      },
+      {
+        lineRange: [6, 6],
+        title: "Add a prefix to every key",
+        body: "Same dynamic-key trick, but compute a different key string: `\"field_\" ++ k` prepends `field_` to each existing key. `++` concatenates strings.",
+      },
+      {
+        lineRange: [7, 7],
+        title: "Transform values, keep keys",
+        body: "Use the original key `(k)` and modify the value. `\"<<\" ++ v ++ \">>\"` wraps every value in angle brackets — `++` coerces non-strings (like `age: 56`) into strings during concatenation.",
+      },
+    ],
+  },
+
+  {
+    id: "8.3-pluck",
+    chapter: "8.3",
+    title: "pluck",
+    description:
+      "`pluck` turns an Object into an **Array**. Signature: `pluck(Object<K,V>, (V, K, Number) -> T): Array<T>`. The lambda decides what each output element looks like — could be just the value, just the key, the full pair, or anything derived. Commonly paired with `groupBy` to throw away the group labels.",
+    tutorialUrl: "https://dataweave.mulesoft.com/learn/tutorial/8.3-pluck",
+    script: `%dw 2.0
+output application/json
+---
+{
+  valuesArr: payload pluck ((v, k, idx) -> v),
+  keysArr:   payload pluck ((v, k, idx) -> k),
+  pairs:     payload pluck ((v, k, idx) -> { (k): v }),
+  withIdx:   payload pluck ((v, k, idx) -> { idx: idx, key: k, value: v })
+}`,
+    payload: { firstName: "Avery", lastName: "Chance", age: 56 },
+    annotations: [
+      {
+        lineRange: [1, 3],
+        title: "Standard header",
+        body: "Body uses `pluck` to convert the payload object into four different array shapes.",
+      },
+      {
+        lineRange: [5, 5],
+        title: "Just the values",
+        body: "`pluck ((v, k, idx) -> v)` returns an array of the object's values, in key-insertion order. Like `Object.values` in JavaScript or `.values()` in Python.",
+      },
+      {
+        lineRange: [6, 6],
+        title: "Just the keys",
+        body: "Return `k` instead and you get the keys as an array — same as `Object.keys`. Useful when you want to iterate or filter by name.",
+      },
+      {
+        lineRange: [7, 7],
+        title: "Singleton-pair objects (canonical pattern)",
+        body: "`{ (k): v }` builds a one-key object using the dynamic-key syntax. The result is `[{firstName: \"…\"}, {lastName: \"…\"}, {age: 56}]` — handy when you need each pair as its own element, e.g. before piping into an array HOF.",
+      },
+      {
+        lineRange: [8, 8],
+        title: "Full reshape",
+        body: "Build any structure you want from each pair. Here we make `{ idx, key, value }` records — easy to consume downstream as a tabular array.",
+      },
+    ],
+  },
+
+  {
+    id: "8.4-update",
+    chapter: "8.4",
+    title: "update",
+    description:
+      "The `update` operator returns a new object/array with specific fields replaced, leaving everything else untouched. Syntax: `subject update { case <binding> at <path> -> <newValueExpr> }`. The optional binding captures the current value so the new value can reference it. **Our engine implements the basic form**; the real-DW upsert (`!`) and guard (`if`) variants are documented in the tutorial but not yet wired up here.",
+    tutorialUrl: "https://dataweave.mulesoft.com/learn/tutorial/8.4-update",
+    script: `%dw 2.0
+output application/json
+---
+{
+  agedUp:   payload update {
+    case currentAge at .age -> currentAge + 1
+  },
+  upperFn:  payload update {
+    case n at .firstName -> upper(n)
+  },
+  twoCases: payload update {
+    case n at .firstName -> upper(n)
+    case a at .age -> a * 2
+  }
+}`,
+    payload: { firstName: "Avery", lastName: "Chance", age: 56, occupation: "Physicist" },
+    annotations: [
+      {
+        lineRange: [1, 3],
+        title: "Standard header",
+        body: "Body uses `update` to modify specific fields of `payload` while keeping the rest. `payload` itself is **never mutated** — `update` returns a new object.",
+      },
+      {
+        lineRange: [5, 7],
+        title: "Capture, transform, write back",
+        body: "`case currentAge at .age -> currentAge + 1` reads: *take the value at `.age`, bind it to `currentAge`, replace `.age` with `currentAge + 1`*. The binding lets the new value reference the old. Path syntax starts with `.` and can chain (`.user.name`, `.items[0].sku`, …).",
+      },
+      {
+        lineRange: [8, 10],
+        title: "Use a function on the captured value",
+        body: "Same shape, different transform — `upper(n)` uppercases the bound name. Any expression that produces a value works as the replacement.",
+      },
+      {
+        lineRange: [11, 14],
+        title: "Multiple cases — applied in order",
+        body: "Each `case` runs sequentially against the running result. Here we first uppercase the first name, then double the age. The output combines both changes; fields not mentioned (lastName, occupation) pass through unchanged.",
       },
     ],
   },

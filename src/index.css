@@ -22,6 +22,23 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+/* Themed scrollbars — match the active palette in both light + dark modes. */
+*,
+*::before,
+*::after {
+  scrollbar-width: thin;
+  scrollbar-color: var(--text-fainter) var(--bg-surface);
+}
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: var(--bg-surface); }
+*::-webkit-scrollbar-thumb {
+  background: var(--text-fainter);
+  border-radius: 5px;
+  border: 2px solid var(--bg-surface);
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
+*::-webkit-scrollbar-corner { background: var(--bg-surface); }
+
 :root,
 :root[data-theme="dark"] {
   color-scheme: dark;

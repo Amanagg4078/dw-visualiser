@@ -1,9 +1,126 @@
 import { dwApplyBinOp, dwNeg, dwBool, dwNot, dwEq } from "./semantics.js";
+import { BUILTINS } from "./stdlib/index.js";
+
+// Recursively remove every key whose value is null (and every null element
+// from arrays). Used to implement `output … skipNullOn = "everywhere"`.
+function stripNulls(v) {
+  if (v == null) return v;
+  if (Array.isArray(v)) {
+    return v.map(stripNulls).filter((x) => x !== null);
+  }
+  if (typeof v === "object") {
+    const out = {};
+    for (const [k, val] of Object.entries(v)) {
+      const cleaned = stripNulls(val);
+      if (cleaned !== null) out[k] = cleaned;
+    }
+    return out;
+  }
+  return v;
+}
+
+// Read the value at a dotted/indexed path inside an object/array structure.
+// Used by the `update` operator. Returns null for missing intermediate steps,
+// matching DW's null-propagating selectors.
+function pathLookup(value, steps) {
+  let cur = value;
+  for (const step of steps) {
+    if (cur == null) return null;
+    if (step.kind === "field") cur = cur[step.name];
+    else if (step.kind === "index") {
+      const i = typeof step.expr === "object" ? null : step.expr;
+      cur = Array.isArray(cur) ? cur[i] : null;
+    }
+    if (cur === undefined) cur = null;
+  }
+  return cur;
+}
+
+// Return a new structure with `value` set at `path`. Objects/arrays along
+// the path are shallow-copied so the original input isn't mutated. If a
+// parent step is missing on an object, it's auto-created; on an array,
+// out-of-bounds writes are no-ops (DW's update creates fields freely on
+// objects but doesn't grow arrays).
+function pathSet(root, steps, value) {
+  if (steps.length === 0) return value;
+  const [step, ...rest] = steps;
+  if (step.kind === "field") {
+    const base = root && typeof root === "object" && !Array.isArray(root) ? { ...root } : {};
+    base[step.name] = pathSet(base[step.name] ?? null, rest, value);
+    return base;
+  }
+  if (step.kind === "index") {
+    const base = Array.isArray(root) ? root.slice() : [];
+    const i = typeof step.expr === "number" ? step.expr : 0;
+    const realIdx = i < 0 ? base.length + i : i;
+    if (realIdx >= 0 && realIdx < base.length) {
+      base[realIdx] = pathSet(base[realIdx], rest, value);
+    }
+    return base;
+  }
+  return root;
+}
 
 export function evaluate(script, payload) {
   const trace = [];
   let stepId = 0;
-  const scopeChain = [{ payload }];
+  // Root frame: payload + every native built-in. User vars/funs go into the
+  // same frame as they're declared.
+  const rootFrame = { payload, ...BUILTINS };
+  const scopeChain = [rootFrame];
+
+  // Evaluate an expression as if it were running inside the closure's
+  // captured scope — used to compute a lambda's parameter defaults, which
+  // can reference outer vars defined alongside the lambda.
+  const evalInClosureScope = (closure, expr) => {
+    const savedChain = scopeChain.slice();
+    scopeChain.length = 0;
+    for (const f of closure.captured) scopeChain.push(f);
+    try {
+      return evalExpr(expr);
+    } finally {
+      scopeChain.length = 0;
+      for (const f of savedChain) scopeChain.push(f);
+    }
+  };
+
+  // Helper used by native built-ins to call a user-passed lambda. Mirrors
+  // the body of the `Call` evaluator branch: swap to the closure's captured
+  // chain + a new frame with params bound, eval body, restore.
+  // Parameters that aren't supplied take their declared default (if any)
+  // or null.
+  const invokeLambda = (closure, lambdaArgs) => {
+    const frame = {};
+    closure.params.forEach((pname, i) => {
+      if (i < lambdaArgs.length && lambdaArgs[i] !== undefined) {
+        frame[pname] = lambdaArgs[i];
+      } else if (closure.paramDefaults && closure.paramDefaults[i]) {
+        frame[pname] = evalInClosureScope(closure, closure.paramDefaults[i]);
+      } else {
+        frame[pname] = null;
+      }
+    });
+    const savedChain = scopeChain.slice();
+    scopeChain.length = 0;
+    for (const f of closure.captured) scopeChain.push(f);
+    scopeChain.push(frame);
+    try {
+      return evalExpr(closure.body);
+    } finally {
+      scopeChain.length = 0;
+      for (const f of savedChain) scopeChain.push(f);
+    }
+  };
+
+  // Exposed to native built-ins so e.g. `reduce` can detect / read a
+  // declared accumulator default without invoking the lambda.
+  const evalParamDefault = (closure, paramIdx) => {
+    const expr = closure.paramDefaults?.[paramIdx];
+    if (!expr) return undefined;
+    return evalInClosureScope(closure, expr);
+  };
+
+  const nativeCtx = { invokeLambda, evalParamDefault };
 
   const snap = () => Object.assign({}, ...scopeChain);
   const emit = (event) => {
@@ -45,7 +162,12 @@ export function evaluate(script, payload) {
     value: result,
   });
 
-  return { result, trace };
+  // Post-process: apply `output ... skipNullOn = "everywhere"` if set on the
+  // header. Recursively strips fields whose value is null at every level of
+  // the result tree. `skipNullOn = "arrays"` / `"objects"` aren't supported
+  // separately yet — we treat any non-null value as "everywhere".
+  const finalResult = script.header.skipNullOn ? stripNulls(result) : result;
+  return { result: finalResult, trace };
 
   function evalExpr(node) {
     if (node.kind === "NumLit" || node.kind === "StrLit" || node.kind === "BoolLit") {
@@ -55,6 +177,31 @@ export function evaluate(script, payload) {
     if (node.kind === "NullLit") {
       emit({ phase: "literal", description: `Literal null`, line: node.line, expr: "null", value: null });
       return null;
+    }
+    if (node.kind === "RangeLit") {
+      // Standalone `(start to end)` — inclusive integer range. When start > end
+      // the result is the reversed sequence (matches real DW: `(5 to 1)` →
+      // `[5,4,3,2,1]`). Non-numeric endpoints produce `null` to mirror the
+      // null-propagation behaviour of the postfix RangeSelector.
+      const startV = evalExpr(node.start);
+      const endV = evalExpr(node.end);
+      let value = null;
+      if (typeof startV === "number" && typeof endV === "number") {
+        const lo = Math.min(startV, endV);
+        const hi = Math.max(startV, endV);
+        const out = [];
+        for (let i = lo; i <= hi; i++) out.push(i);
+        if (startV > endV) out.reverse();
+        value = out;
+      }
+      emit({
+        phase: "range-lit",
+        description: `Range (${formatValue(startV)} to ${formatValue(endV)})`,
+        line: node.line,
+        expr: exprToStr(node),
+        value,
+      });
+      return value;
     }
     if (node.kind === "Ident") {
       // Walk the scope chain from the top (most recent frame, usually a
@@ -231,6 +378,33 @@ export function evaluate(script, payload) {
       emit({ phase: "logical", description: `${formatValue(l)} ${node.op} ${formatValue(r)}`, line: node.line, expr: exprToStr(node), value: result });
       return result;
     }
+    if (node.kind === "UpdateExpr") {
+      // Sequentially apply each `case <bind?> at <path> -> <expr>` to the
+      // (running) subject. Returns a *new* object/array — input is not
+      // mutated. `<bind>` makes the current value at <path> available
+      // inside <expr> under the bound name.
+      let current = evalExpr(node.subject);
+      for (const c of node.cases) {
+        const oldVal = pathLookup(current, c.path);
+        // Push a frame with the binding (if any), evaluate the new value,
+        // then write it back at the path.
+        const frame = {};
+        if (c.bind) frame[c.bind] = oldVal;
+        scopeChain.push(frame);
+        let newVal;
+        try { newVal = evalExpr(c.result); }
+        finally { scopeChain.pop(); }
+        current = pathSet(current, c.path, newVal);
+      }
+      emit({
+        phase: "update",
+        description: `${exprToStr(node.subject)} update { … } (${node.cases.length} ${node.cases.length === 1 ? "case" : "cases"})`,
+        line: node.line,
+        expr: exprToStr(node),
+        value: current,
+      });
+      return current;
+    }
     if (node.kind === "MatchExpr") {
       // Evaluate the subject once, then try cases in order. Each case's
       // literal is evaluated and compared via dwEq (strict). First match
@@ -263,6 +437,19 @@ export function evaluate(script, payload) {
       });
       return result;
     }
+    if (node.kind === "DefaultOp") {
+      // Short-circuit: only evaluate `right` if `left` is null/missing.
+      const l = evalExpr(node.left);
+      const result = l == null ? evalExpr(node.right) : l;
+      emit({
+        phase: "default",
+        description: l == null ? `(null) default … → ${formatValue(result)}` : `${formatValue(l)} default … (lhs kept)`,
+        line: node.line,
+        expr: exprToStr(node),
+        value: result,
+      });
+      return result;
+    }
     if (node.kind === "IfElse") {
       // Lazy: only evaluate the branch we take. Tracer notes which side.
       const condV = evalExpr(node.cond);
@@ -281,10 +468,13 @@ export function evaluate(script, payload) {
     if (node.kind === "Lambda") {
       // Capture a *reference* to each frame in the current chain so the
       // closure picks up vars/functions defined alongside it (and any
-      // forward-defined siblings in the same frame).
+      // forward-defined siblings in the same frame). paramDefaults are
+      // carried through verbatim so invokeLambda can resolve them lazily
+      // at call time.
       const closure = {
         __closure: true,
         params: node.params,
+        paramDefaults: node.paramDefaults || node.params.map(() => null),
         body: node.body,
         captured: scopeChain.slice(),
       };
@@ -303,10 +493,26 @@ export function evaluate(script, payload) {
         throw new Error(`Cannot call non-function at line ${node.line}`);
       }
       const args = node.args.map((a) => evalExpr(a));
+
+      // Native built-ins: dispatch to their JS impl. They get a context with
+      // `invokeLambda` so HOFs like filter/map/reduce can call user lambdas.
+      if (callee.__native === true) {
+        const result = callee.invoke(args, nativeCtx);
+        emit({
+          phase: "call",
+          description: `${exprToStr(node.callee)}(${args.map(formatValue).join(", ")})`,
+          line: node.line,
+          expr: exprToStr(node),
+          value: result,
+        });
+        return result;
+      }
+
+      // User-defined function / lambda: swap to the closure's captured chain
+      // + a new frame with params bound. Saves + restores so nested calls
+      // compose.
       const frame = {};
       callee.params.forEach((pname, i) => { frame[pname] = i < args.length ? args[i] : null; });
-      // Swap the live chain to the closure's captured chain + this call's frame.
-      // Saves + restores so nested calls compose.
       const savedChain = scopeChain.slice();
       scopeChain.length = 0;
       for (const f of callee.captured) scopeChain.push(f);
@@ -336,9 +542,12 @@ export function evaluate(script, payload) {
       const obj = {};
       emit({ phase: "object-start", description: `Begin building object`, line: node.line, expr: exprToStr(node) });
       for (const f of node.fields) {
+        // Dynamic key: `(expr): value`. Evaluate the key expression first
+        // and coerce to a string-like key (DW's `Key` type).
+        const keyName = f.keyExpr ? String(evalExpr(f.keyExpr)) : f.key;
         const val = evalExpr(f.value);
-        obj[f.key] = val;
-        emit({ phase: "object-field", description: `Set field "${f.key}" = ${formatValue(val)}`, line: f.line ?? node.line, expr: `${f.key}: ${exprToStr(f.value)}`, value: val });
+        obj[keyName] = val;
+        emit({ phase: "object-field", description: `Set field "${keyName}" = ${formatValue(val)}`, line: f.line ?? node.line, expr: `${keyName}: ${exprToStr(f.value)}`, value: val });
       }
       emit({ phase: "object-done", description: `Object complete`, line: node.line, expr: exprToStr(node), value: obj });
       return obj;
@@ -379,6 +588,7 @@ export function exprToStr(node) {
     case "Selector": return `${exprToStr(node.object)}.${node.field}`;
     case "IndexSelector": return `${exprToStr(node.object)}[${exprToStr(node.index)}]`;
     case "RangeSelector": return `${exprToStr(node.object)}[${exprToStr(node.start)} to ${exprToStr(node.end)}]`;
+    case "RangeLit": return `(${exprToStr(node.start)} to ${exprToStr(node.end)})`;
     case "MultiValueSelector": return `${exprToStr(node.object)}.*${node.field}`;
     case "DescendantsSelector": return `${exprToStr(node.object)}..${node.field}`;
     case "BinOp": return `(${exprToStr(node.left)} ${node.op} ${exprToStr(node.right)})`;
@@ -386,9 +596,18 @@ export function exprToStr(node) {
     case "LogicalNot": return `not ${exprToStr(node.operand)}`;
     case "UnaryOp": return `${node.op}${exprToStr(node.operand)}`;
     case "IfElse": return `if (${exprToStr(node.cond)}) ${exprToStr(node.then)} else ${exprToStr(node.else)}`;
-    case "Lambda": return `(${node.params.join(", ")}) -> ${exprToStr(node.body)}`;
+    case "Lambda": {
+      const ps = node.params.map((p, i) =>
+        node.paramDefaults && node.paramDefaults[i]
+          ? `${p} = ${exprToStr(node.paramDefaults[i])}`
+          : p
+      );
+      return `(${ps.join(", ")}) -> ${exprToStr(node.body)}`;
+    }
     case "Call": return `${exprToStr(node.callee)}(${node.args.map(exprToStr).join(", ")})`;
     case "MatchExpr": return `${exprToStr(node.subject)} match { … }`;
+    case "UpdateExpr": return `${exprToStr(node.subject)} update { … }`;
+    case "DefaultOp": return `${exprToStr(node.left)} default ${exprToStr(node.right)}`;
     case "ObjectLit": return `{${node.fields.map(f => `${f.key}: ${exprToStr(f.value)}`).join(", ")}}`;
     case "ArrayLit": return `[${node.items.map((it) => exprToStr(it.value)).join(", ")}]`;
     default: return "?";

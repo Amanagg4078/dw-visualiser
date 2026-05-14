@@ -9,9 +9,9 @@ const isPrimitive = (v) => v === null || typeof v !== "object";
 // fine in either theme. Picked away from theme vars so replace-all stays safe.
 const PHASE_COLORS = {
   literal: "#6b7280", lookup: "#2563eb", selector: "#0891b2", "index-selector": "#0e7490",
-  "range-selector": "#155e75", "multi-value-selector": "#0e7490", "descendants-selector": "#1e40af",
+  "range-selector": "#155e75", "range-lit": "#155e75", "multi-value-selector": "#0e7490", "descendants-selector": "#1e40af",
   binop: "#8b5cf6", unary: "#8b5cf6", logical: "#d946ef",
-  "if-else": "#db2777", lambda: "#0d9488", call: "#16a34a", match: "#be185d",
+  "if-else": "#db2777", lambda: "#0d9488", call: "#16a34a", match: "#be185d", update: "#7c2d12", default: "#a16207",
   "object-start": "#059669", "object-field": "#10b981", "object-done": "#15803d",
   "array-start": "#059669", "array-item": "#10b981", "array-done": "#15803d",
   "var-start": "#a16207", "var-done": "#ca8a04",
@@ -32,8 +32,91 @@ const LINE_PX = FONT_SIZE * LINE_HEIGHT;
 const ARROW_GREEN = "var(--arrow-green)"; // just executed
 const ARROW_RED   = "var(--arrow-red)"; // next to execute
 
-function ScriptGutter({ lineCount, prevLine, nextLine, scrollTop }) {
-  const linePos = (n) => PADDING + (n - 1) * LINE_PX;
+// Auto-pairs the editors do when the user types an opener:
+//   "(" → "()"  with the caret between them
+//   "[" → "[]"
+//   "{" → "{}"
+//   '"' → '""'
+// Plus two ergonomics:
+//   - Skip-over: typing a closer when the same char is already to the right
+//     of the cursor just moves the caret instead of inserting a duplicate.
+//   - Smart backspace: when the caret sits between an empty matched pair,
+//     backspace deletes both halves.
+// Called from the script + input textareas' onKeyDown. No-op on read-only.
+const AUTO_PAIRS = { "(": ")", "[": "]", "{": "}", '"': '"' };
+const AUTO_CLOSERS = new Set(Object.values(AUTO_PAIRS));
+function handleAutoClose(e, setValue, setStep) {
+  const ta = e.target;
+  if (ta.readOnly) return;
+  const start = ta.selectionStart;
+  const end = ta.selectionEnd;
+  const value = ta.value;
+  const setCaret = (pos) => {
+    requestAnimationFrame(() => { ta.selectionStart = ta.selectionEnd = pos; });
+  };
+
+  // Skip-over: closer typed when same char is already next (handles `"` first
+  // since it's both an opener and a closer).
+  if (start === end && AUTO_CLOSERS.has(e.key) && value[start] === e.key) {
+    e.preventDefault();
+    setCaret(start + 1);
+    return;
+  }
+
+  // Auto-pair the opener (only when no text is selected — otherwise let the
+  // browser handle it as a replace).
+  if (start === end && e.key in AUTO_PAIRS) {
+    e.preventDefault();
+    const opener = e.key;
+    const closer = AUTO_PAIRS[opener];
+    setValue(value.slice(0, start) + opener + closer + value.slice(end));
+    if (setStep) setStep(0);
+    setCaret(start + 1);
+    return;
+  }
+
+  // Smart backspace inside an empty matched pair.
+  if (e.key === "Backspace" && start === end && start > 0) {
+    const before = value[start - 1];
+    const after = value[start];
+    if (AUTO_PAIRS[before] && AUTO_PAIRS[before] === after) {
+      e.preventDefault();
+      setValue(value.slice(0, start - 1) + value.slice(start + 1));
+      if (setStep) setStep(0);
+      setCaret(start - 1);
+    }
+  }
+}
+
+// Measure how wide one monospace character renders at FONT_SIZE. Used to
+// estimate how many visual rows each logical line wraps into so the gutter
+// can give each logical line a single line number that spans the height of
+// all its wrap rows (matches what an IDE like VSCode shows).
+const measureMonospaceCharWidth = () => {
+  if (typeof document === "undefined") return FONT_SIZE * 0.6; // SSR fallback
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  ctx.font = `${FONT_SIZE}px ui-monospace, Consolas, monospace`;
+  return ctx.measureText("M").width;
+};
+const CHAR_WIDTH = measureMonospaceCharWidth();
+
+// For a given logical line and the editor's content width, how many visual
+// rows does the line occupy?
+function visualRowsForLine(line, contentWidth) {
+  if (contentWidth <= 0) return 1;
+  const charsPerRow = Math.max(1, Math.floor(contentWidth / CHAR_WIDTH));
+  return Math.max(1, Math.ceil((line.length || 1) / charsPerRow));
+}
+
+function ScriptGutter({ lineHeights, prevLine, nextLine, scrollTop }) {
+  // Cumulative top offsets per logical line — `linePos(n)` is the Y position
+  // (within the scrolling layer) at which line n's gutter entry / arrow sits.
+  const lineTops = [];
+  let acc = PADDING;
+  for (const h of lineHeights) { lineTops.push(acc); acc += h; }
+  const linePos = (n) => lineTops[n - 1] ?? PADDING;
+
   return (
     <div style={{
       width: 52,
@@ -57,11 +140,15 @@ function ScriptGutter({ lineCount, prevLine, nextLine, scrollTop }) {
         color: "var(--text-fainter)",
         position: "relative",
       }}>
-        {Array.from({ length: Math.max(lineCount, 1) }, (_, i) => (
+        {/* One entry per logical line, height proportional to how many visual */}
+        {/* rows it wraps into. Number is top-aligned so it sits on the first row. */}
+        {lineHeights.map((h, i) => (
           <div key={i} style={{
-            height: `${LINE_HEIGHT}em`,
+            height: h,
             paddingRight: 8,
+            paddingTop: 0,
             textAlign: "right",
+            lineHeight: `${LINE_HEIGHT}em`,
           }}>{i + 1}</div>
         ))}
 
@@ -181,7 +268,14 @@ function JsonView({ value, indent = 0 }) {
 // JSON cards. The Frame still lists the heap-object names so you can see all
 // declared bindings together.
 function ScopePanel({ scope }) {
-  const entries = Object.entries(scope || {});
+  // The root frame seeds every script with built-in HOFs (filter, map, …) and
+  // helpers (upper, lower, sizeOf). Those are always in scope but are
+  // implementation noise from a learner's perspective — hide them so the
+  // panel shows only what the user actually wrote (payload, vars, lambda
+  // params, user-defined functions).
+  const entries = Object.entries(scope || {}).filter(
+    ([, v]) => !(v && typeof v === "object" && v.__native === true)
+  );
   if (entries.length === 0) return null;
   const frame = entries.filter(([, v]) => isPrimitive(v));
   const heap  = entries.filter(([, v]) => !isPrimitive(v));
@@ -349,7 +443,36 @@ export default function App() {
     try { return JSON.parse(localStorage.getItem("dw-about-collapsed") || "{}"); }
     catch { return {}; }
   });
+  // Playground caveat banner — dismissible, sticks via localStorage.
+  const [playgroundWarningDismissed, setPlaygroundWarningDismissed] = useState(() => {
+    try { return localStorage.getItem("dw-playground-warning-dismissed") === "true"; }
+    catch { return false; }
+  });
+  const dismissPlaygroundWarning = () => {
+    setPlaygroundWarningDismissed(true);
+    try { localStorage.setItem("dw-playground-warning-dismissed", "true"); } catch { /* ignore */ }
+  };
+  // Draggable layout splits.
+  // - leftWidthPct: how wide the left pane is, as a % of the body's width
+  // - scriptFlexPct: how tall the Script section is, as a % of the
+  //   (script + input) flex zone (the nav bar at the bottom keeps natural height).
+  const [leftWidthPct, setLeftWidthPct] = useState(42);
+  const [scriptFlexPct, setScriptFlexPct] = useState(71); // ≈ original 2.5/(2.5+1)
+  const [hSplitDragging, setHSplitDragging] = useState(false); // left/right
+  const [vSplitDragging, setVSplitDragging] = useState(false); // script/input
+  const bodyRef = useRef(null);
+  const leftEditorZoneRef = useRef(null);
   const aboutCollapsed = !!aboutCollapsedById[loadedSampleId];
+  // Step-card body collapse. Auto-folds on entering the last step (so the
+  // Final Output below grabs focus), auto-unfolds on leaving it. User can
+  // toggle manually in between — the next entry/exit transition resets it.
+  const [stepCardCollapsed, setStepCardCollapsed] = useState(false);
+  const prevIsLastStepRef = useRef(false);
+  // Width of the script textarea's *content area* (clientWidth minus padding).
+  // Used to figure out how many visual rows each logical line wraps into,
+  // which in turn drives the gutter's per-line heights so one logical line
+  // gets one line number even when its text wraps over multiple visual rows.
+  const [codeContentWidth, setCodeContentWidth] = useState(0);
   const toggleAbout = () => {
     setAboutCollapsedById((m) => {
       const next = { ...m, [loadedSampleId]: !m[loadedSampleId] };
@@ -453,12 +576,46 @@ export default function App() {
   const goNext  = () => setCursor(cursor + 1);
   const goLast  = () => setCursor(total - 1);
 
+  // Auto-collapse the step body when we land on the last step so the Final
+  // Output (which appears at the same time) gets the visual focus.
+  useEffect(() => {
+    if (isLastStep && !prevIsLastStepRef.current) setStepCardCollapsed(true);
+    else if (!isLastStep && prevIsLastStepRef.current) setStepCardCollapsed(false);
+    prevIsLastStepRef.current = isLastStep;
+  }, [isLastStep]);
+
+  // Track the script textarea's content width via ResizeObserver, so the
+  // gutter recomputes wrap-aware line heights whenever the editor is resized
+  // (panel resize, theme/font tweaks, etc.).
+  useEffect(() => {
+    const ta = codeRef.current;
+    if (!ta || typeof ResizeObserver === "undefined") return;
+    const update = () => setCodeContentWidth(Math.max(0, ta.clientWidth - 2 * PADDING));
+    update();
+    const obs = new ResizeObserver(update);
+    obs.observe(ta);
+    return () => obs.disconnect();
+  }, []);
+
+  // Per-logical-line heights of the script editor. Recomputed when the code
+  // text or the textarea's content width changes.
+  const lineHeights = useMemo(() => {
+    const lines = code.split("\n");
+    return lines.map((line) => visualRowsForLine(line, codeContentWidth) * LINE_PX);
+  }, [code, codeContentWidth]);
+  const lineTopOf = (n) => {
+    let y = PADDING;
+    for (let i = 0; i < (n - 1) && i < lineHeights.length; i++) y += lineHeights[i];
+    return y;
+  };
+
   // Keep the just-executed line visible when stepping. Smooth-scroll the
-  // textarea; its onScroll already syncs the gutter.
+  // textarea; its onScroll already syncs the gutter. Uses lineTopOf so the
+  // calculation respects wrapped lines.
   useEffect(() => {
     const ta = codeRef.current;
     if (!ta || !current?.line) return;
-    const lineY = PADDING + (current.line - 1) * LINE_PX;
+    const lineY = lineTopOf(current.line);
     const margin = LINE_PX * 2;
     const top = ta.scrollTop;
     const bottom = top + ta.clientHeight;
@@ -467,9 +624,8 @@ export default function App() {
     } else if (lineY > bottom - margin) {
       ta.scrollTo({ top: lineY - ta.clientHeight + margin, behavior: "smooth" });
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current?.line]);
-
-  const codeLineCount = code.split("\n").length;
 
   return (
     <div style={{
@@ -491,8 +647,28 @@ export default function App() {
         gap: 10,
         flexShrink: 0,
       }}>
-        <span style={{ fontSize: 16 }}>⚡</span>
-        <div style={{ fontWeight: 700, fontSize: 13 }}>DataWeave Engine 0.1</div>
+        <img src="/dw-visualiser.png" alt="" width="22" height="22" style={{ display: "block" }} />
+        <div style={{ fontWeight: 700, fontSize: 13 }}>DataWeave Visualiser</div>
+        <a
+          href="https://github.com/Amanagg4078/dw-visualiser/tree/main"
+          target="_blank"
+          rel="noopener noreferrer"
+          title="View source on GitHub"
+          aria-label="View source on GitHub"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            color: "var(--text-muted)",
+            textDecoration: "none",
+            padding: "2px 4px",
+            borderRadius: 4,
+            marginLeft: 2,
+          }}
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
+          </svg>
+        </a>
         <div style={{ display: "inline-flex", borderRadius: 4, border: "1px solid var(--border)", overflow: "hidden", marginLeft: 6, fontSize: 10 }}>
           {[
             { id: "lessons",    label: "Lessons" },
@@ -599,19 +775,37 @@ export default function App() {
       </div>
 
       {/* Body */}
-      <div style={{ display: "flex", flex: 1, overflow: "hidden", minHeight: 0 }}>
+      <div
+        ref={bodyRef}
+        style={{ display: "flex", flex: 1, overflow: "hidden", minHeight: 0 }}
+        onPointerMove={(e) => {
+          if (hSplitDragging && bodyRef.current) {
+            const rect = bodyRef.current.getBoundingClientRect();
+            const pct = ((e.clientX - rect.left) / rect.width) * 100;
+            setLeftWidthPct(Math.max(20, Math.min(80, pct)));
+          }
+          if (vSplitDragging && leftEditorZoneRef.current) {
+            const rect = leftEditorZoneRef.current.getBoundingClientRect();
+            const pct = ((e.clientY - rect.top) / rect.height) * 100;
+            setScriptFlexPct(Math.max(15, Math.min(90, pct)));
+          }
+        }}
+        onPointerUp={() => { setHSplitDragging(false); setVSplitDragging(false); }}
+      >
         {/* LEFT: script + input + nav */}
         <div style={{
-          width: "42%",
-          borderRight: "1px solid var(--border)",
+          width: `${leftWidthPct}%`,
           display: "flex",
           flexDirection: "column",
           overflow: "hidden",
           minHeight: 0,
         }}>
+          {/* The flex zone shared by Script + Input (everything except the */}
+          {/* fixed-height nav bar). We measure this for the script/input split. */}
+          <div ref={leftEditorZoneRef} style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0 }}>
           {/* Script section */}
           <div style={{
-            flex: 2.5,
+            flex: `${scriptFlexPct} 1 0`,
             display: "flex",
             flexDirection: "column",
             overflow: "hidden",
@@ -626,7 +820,7 @@ export default function App() {
             }>📝 Script</SectionLabel>
             <div style={{ flex: 1, display: "flex", overflow: "hidden", minHeight: 0 }}>
               <ScriptGutter
-                lineCount={codeLineCount}
+                lineHeights={lineHeights}
                 prevLine={current?.line}
                 nextLine={nextLine}
                 scrollTop={scrollTop}
@@ -636,6 +830,7 @@ export default function App() {
                 value={code}
                 onChange={(e) => { setCode(e.target.value); setStep(0); }}
                 onScroll={(e) => setScrollTop(e.target.scrollTop)}
+                onKeyDown={(e) => handleAutoClose(e, setCode, setStep)}
                 readOnly={isLessonLocked}
                 spellCheck={false}
                 title={isLessonLocked ? "Locked — concept lessons use a fixed script. Pick a Recipe or Selector sample from the dropdown to edit freely." : undefined}
@@ -658,12 +853,23 @@ export default function App() {
             </div>
           </div>
 
+          {/* Horizontal splitter between Script and Input. Drag to resize. */}
+          <div
+            onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); setVSplitDragging(true); }}
+            title="Drag to resize"
+            style={{
+              flex: "0 0 5px",
+              cursor: "row-resize",
+              background: vSplitDragging ? "var(--accent)" : "var(--border)",
+              transition: "background 120ms",
+              touchAction: "none",
+            }}
+          />
           {/* Input section */}
           <div style={{
-            flex: 1,
+            flex: `${100 - scriptFlexPct} 1 0`,
             display: "flex",
             flexDirection: "column",
-            borderTop: "1px solid var(--border)",
             overflow: "hidden",
             minHeight: 0,
           }}>
@@ -676,6 +882,7 @@ export default function App() {
             <textarea
               value={input}
               onChange={(e) => { setInput(e.target.value); setStep(0); }}
+              onKeyDown={(e) => handleAutoClose(e, setInput, setStep)}
               readOnly={isLessonLocked}
               spellCheck={false}
               style={{
@@ -695,6 +902,7 @@ export default function App() {
               }}
             />
           </div>
+          </div>{/* end leftEditorZoneRef */}
 
           {/* Nav controls */}
           {compiled.ok && trace.length > 0 && (
@@ -708,12 +916,13 @@ export default function App() {
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
                 <div style={{ display: "inline-flex", borderRadius: 4, border: "1px solid var(--text-fainter)", overflow: "hidden", fontSize: 10 }}>
                   {[
-                    { id: "line",  label: "Line" },
-                    { id: "event", label: "Event" },
+                    { id: "line",  label: "Line",  tip: "Step source-line by source-line — one click moves the cursor to the next line of the script. Best for learning the flow." },
+                    { id: "event", label: "Event", tip: "Step AST-event by AST-event — finer-grained, shows every lookup, operator, and sub-expression. Useful for digging into how the engine evaluates." },
                   ].map((m) => (
                     <button
                       key={m.id}
                       onClick={() => setMode(m.id)}
+                      title={m.tip}
                       style={{
                         background: mode === m.id ? "var(--accent)" : "transparent",
                         color: mode === m.id ? "#fff" : "var(--text-muted)",
@@ -795,6 +1004,19 @@ export default function App() {
           )}
         </div>
 
+        {/* Vertical splitter between left pane and right pane. Drag to resize. */}
+        <div
+          onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); setHSplitDragging(true); }}
+          title="Drag to resize"
+          style={{
+            flex: "0 0 5px",
+            cursor: "col-resize",
+            background: hSplitDragging ? "var(--accent)" : "var(--border)",
+            transition: "background 120ms",
+            touchAction: "none",
+          }}
+        />
+
         {/* RIGHT: step card + final output */}
         <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0 }}>
           {!compiled.ok ? (
@@ -812,6 +1034,50 @@ export default function App() {
             </div>
           ) : (
             <div style={{ flex: 1, overflowY: "auto", padding: 14, minHeight: 0 }}>
+              {/* Playground caveat — only in playground mode, dismissable. */}
+              {uiMode === "playground" && !playgroundWarningDismissed && (
+                <div style={{
+                  background: "var(--bg-error)",
+                  border: "1px solid var(--arrow-red)",
+                  borderLeft: "4px solid var(--arrow-red)",
+                  borderRadius: 8,
+                  padding: "10px 12px",
+                  marginBottom: 14,
+                  fontSize: 12,
+                  lineHeight: 1.55,
+                  color: "var(--text-muted)",
+                  position: "relative",
+                }}>
+                  <button
+                    onClick={dismissPlaygroundWarning}
+                    title="Dismiss"
+                    aria-label="Dismiss warning"
+                    style={{
+                      position: "absolute",
+                      top: 6,
+                      right: 8,
+                      background: "transparent",
+                      color: "var(--text-error)",
+                      border: "none",
+                      cursor: "pointer",
+                      fontSize: 16,
+                      lineHeight: 1,
+                      padding: "2px 6px",
+                    }}
+                  >×</button>
+                  <div style={{ color: "var(--arrow-red)", fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>
+                    Heads up — this isn't a real DataWeave runtime
+                  </div>
+                  <div>
+                    This Playground is a <strong>learner tool</strong> that simulates a slice of DataWeave to step through what the tutorial covers. Scope: only the language features shown in lessons 1–8.
+                  </div>
+                  <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                    <li>No DataWeave libraries (`dw::core::Strings`, `dw::core::Arrays`, etc.) — only the lesson-covered built-ins.</li>
+                    <li>Only JSON input and output. XML / CSV / YAML aren't supported.</li>
+                    <li>There may be bugs or semantic gaps — this is an approximation, not the official engine.</li>
+                  </ul>
+                </div>
+              )}
               {isLessonView && loadedSample?.description && (
                 <div style={{
                   background: "var(--bg-panel)",
@@ -903,7 +1169,14 @@ export default function App() {
                   border: `1px solid ${PHASE_COLORS[current.phase] ? PHASE_COLORS[current.phase] + "55" : "var(--border)"}`,
                   marginBottom: 14,
                 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setStepCardCollapsed((c) => !c)}
+                    onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setStepCardCollapsed((c) => !c); }}
+                    title={stepCardCollapsed ? "Show step details" : "Hide step details"}
+                    style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: stepCardCollapsed ? 0 : 10, cursor: "pointer", userSelect: "none" }}
+                  >
                     <span style={{
                       background: PHASE_COLORS[current.phase] || "var(--border)",
                       color: "#fff",
@@ -916,21 +1189,28 @@ export default function App() {
                     }}>
                       {current.phase}
                     </span>
-                    <span style={{ color: "var(--text-faint)", fontSize: 12 }}>Step {safeStep + 1} / {trace.length}</span>
+                    <span style={{ color: "var(--text-faint)", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      Step {safeStep + 1} / {trace.length}
+                      <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{stepCardCollapsed ? "▸" : "▾"}</span>
+                    </span>
                   </div>
 
-                  <p style={{ color: "var(--text)", fontSize: 14, margin: "0 0 10px", lineHeight: 1.5 }}>{current.description}</p>
+                  {!stepCardCollapsed && (
+                    <>
+                      <p style={{ color: "var(--text)", fontSize: 14, margin: "0 0 10px", lineHeight: 1.5 }}>{current.description}</p>
 
-                  {current.value !== undefined && (
-                    <div style={{ marginBottom: 10 }}>
-                      <div style={{ color: "var(--text-muted)", fontSize: 10, marginBottom: 3, textTransform: "uppercase", letterSpacing: 1 }}>Value</div>
-                      <div style={{ background: "var(--bg-surface)", borderRadius: 6, padding: "6px 10px", fontFamily: "monospace", fontSize: 12, color: "var(--text-output)", maxHeight: 180, overflowY: "auto" }}>
-                        <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{formatValue(current.value)}</pre>
-                      </div>
-                    </div>
+                      {current.value !== undefined && (
+                        <div style={{ marginBottom: 10 }}>
+                          <div style={{ color: "var(--text-muted)", fontSize: 10, marginBottom: 3, textTransform: "uppercase", letterSpacing: 1 }}>Value</div>
+                          <div style={{ background: "var(--bg-surface)", borderRadius: 6, padding: "6px 10px", fontFamily: "monospace", fontSize: 12, color: "var(--text-output)", maxHeight: 180, overflowY: "auto" }}>
+                            <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{formatValue(current.value)}</pre>
+                          </div>
+                        </div>
+                      )}
+
+                      <ScopePanel scope={current.scope} />
+                    </>
                   )}
-
-                  <ScopePanel scope={current.scope} />
                 </div>
               )}
 
