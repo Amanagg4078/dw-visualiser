@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { tokenize, parse, evaluate, formatValue, buildLineSteps, lineIndexForStep } from "./engine";
 import { dwEntries } from "./engine/semantics.js";
 import { SAMPLES, SAMPLES_BY_ID } from "./samples";
+import Tour, { useTour } from "./Tour.jsx";
 
 const isPrimitive = (v) => v === null || typeof v !== "object";
 
@@ -144,7 +145,7 @@ function ScriptGutter({ lineHeights, prevLine, nextLine, scrollTop }) {
   const linePos = (n) => lineTops[n - 1] ?? PADDING;
 
   return (
-    <div style={{
+    <div data-tour="gutter" style={{
       width: 52,
       background: "var(--bg-elev)",
       borderRight: "1px solid var(--bg-panel)",
@@ -392,6 +393,7 @@ function renderAnnotationBody(text) {
   });
 }
 
+
 // Small uppercase "Copy" button shared by the script editor, input editor, and
 // final output. Flashes "Copied" on success. Silently no-ops if clipboard
 // access is denied (some embedded contexts disable it).
@@ -482,6 +484,10 @@ export default function App() {
     setPlaygroundWarningDismissed(true);
     try { localStorage.setItem("dw-playground-warning-dismissed", "true"); } catch { /* ignore */ }
   };
+  // First-time onboarding tour — see Tour.jsx. Auto-opens on first visit,
+  // re-openable via the `?` button, mid-tour refresh resumes at the same
+  // step (persisted under `dw-tour-step`).
+  const tour = useTour();
   // Draggable layout splits.
   // - leftWidthPct: how wide the left pane is, as a % of the body's width
   // - scriptFlexPct: how tall the Script section is, as a % of the
@@ -667,6 +673,13 @@ export default function App() {
       fontFamily: "system-ui, sans-serif",
       overflow: "hidden",
     }}>
+      <Tour
+        key={tour.sessionId}
+        open={tour.open}
+        initialStep={tour.initialStep}
+        onClose={tour.close}
+        onStepChange={tour.persistStep}
+      />
       {/* Header */}
       <div style={{
         background: "var(--bg-panel)",
@@ -699,7 +712,7 @@ export default function App() {
             <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
           </svg>
         </a>
-        <div style={{ display: "inline-flex", borderRadius: 4, border: "1px solid var(--border)", overflow: "hidden", marginLeft: 6, fontSize: 10 }}>
+        <div data-tour="mode-toggle" style={{ display: "inline-flex", borderRadius: 4, border: "1px solid var(--border)", overflow: "hidden", marginLeft: 6, fontSize: 10 }}>
           {[
             { id: "lessons",    label: "Lessons" },
             { id: "playground", label: "Playground" },
@@ -722,6 +735,7 @@ export default function App() {
         </div>
         {isLessonView && (
           <select
+            data-tour="lesson-select"
             value={loadedSampleId}
             onChange={(e) => loadSample(e.target.value)}
             title="Load a tutorial lesson"
@@ -776,7 +790,7 @@ export default function App() {
             tutorial ↗
           </a>
         )}
-        <div style={{ marginLeft: "auto", display: "flex", gap: 14, fontSize: 11, alignItems: "center" }}>
+        <div data-tour="header-tools" style={{ marginLeft: "auto", display: "flex", gap: 14, fontSize: 11, alignItems: "center" }}>
           {uiMode === "playground" && (
             <span
               role="img"
@@ -801,6 +815,29 @@ export default function App() {
           {compiled.ok && (
             <span style={{ color: "var(--text-muted)" }}>Events: <b style={{ color: "var(--accent-soft)" }}>{trace.length}</b></span>
           )}
+          <button
+            onClick={tour.reopen}
+            title="Quick tour of the visualiser"
+            aria-label="Open quick tour"
+            style={{
+              background: "transparent",
+              border: "1px solid var(--border)",
+              color: "var(--text)",
+              borderRadius: "50%",
+              width: 22,
+              height: 22,
+              padding: 0,
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: "pointer",
+              lineHeight: 1,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            ?
+          </button>
           <button
             onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
             title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
@@ -852,7 +889,7 @@ export default function App() {
           {/* fixed-height nav bar). We measure this for the script/input split. */}
           <div ref={leftEditorZoneRef} style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0 }}>
           {/* Script section */}
-          <div style={{
+          <div data-tour="script-editor" style={{
             flex: `${scriptFlexPct} 1 0`,
             display: "flex",
             flexDirection: "column",
@@ -914,7 +951,7 @@ export default function App() {
             }}
           />
           {/* Input section */}
-          <div style={{
+          <div data-tour="input-editor" style={{
             flex: `${100 - scriptFlexPct} 1 0`,
             display: "flex",
             flexDirection: "column",
@@ -962,7 +999,7 @@ export default function App() {
             }}>
               {/* Mode toggle + counter row */}
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                <div style={{ display: "inline-flex", borderRadius: 4, border: "1px solid var(--text-fainter)", overflow: "hidden", fontSize: 10 }}>
+                <div data-tour="step-mode" style={{ display: "inline-flex", borderRadius: 4, border: "1px solid var(--text-fainter)", overflow: "hidden", fontSize: 10 }}>
                   {[
                     { id: "line",  label: "Line",  tip: "Step source-line by source-line — one click moves the cursor to the next line of the script. Best for learning the flow." },
                     { id: "event", label: "Event", tip: "Step AST-event by AST-event — finer-grained, shows every lookup, operator, and sub-expression. Useful for digging into how the engine evaluates." },
@@ -1041,7 +1078,7 @@ export default function App() {
                   transition: dragging ? "none" : "left 150ms ease-out, box-shadow 120ms",
                 }} />
               </div>
-              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <div data-tour="step-controls" style={{ display: "flex", gap: 6, alignItems: "center" }}>
                 <button onClick={goFirst} disabled={atStart} style={btn(atStart)}>⏮</button>
                 <button onClick={goPrev}  disabled={atStart} style={btn(atStart)}>◀ Prev</button>
                 <div style={{ flex: 1 }} />
@@ -1256,7 +1293,9 @@ export default function App() {
                         </div>
                       )}
 
-                      <ScopePanel scope={current.scope} />
+                      <div data-tour="scope-panel">
+                        <ScopePanel scope={current.scope} />
+                      </div>
                     </>
                   )}
                 </div>
@@ -1269,7 +1308,7 @@ export default function App() {
                   ? (loadedSample.mockedOutputs[selectedMime] ?? Object.values(loadedSample.mockedOutputs)[0])
                   : dwStringify(compiled.result);
                 return (
-                  <div style={{ background: "var(--bg-output)", borderRadius: 10, padding: 12, border: "1px solid var(--border-output)" }}>
+                  <div data-tour="output-panel" style={{ background: "var(--bg-output)", borderRadius: 10, padding: 12, border: "1px solid var(--border-output)" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
                       <div style={{ color: "var(--text-output-label)", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1 }}>
                         Final Output{useMocked ? <span style={{ marginLeft: 8, color: "var(--text-faint)", fontWeight: 500, textTransform: "none", letterSpacing: 0, fontStyle: "italic" }}>mocked — engine emits JSON only</span> : null}
