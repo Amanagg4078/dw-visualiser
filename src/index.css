@@ -1,0 +1,129 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg-surface);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Themed scrollbars — match the active palette in both light + dark modes. */
+*,
+*::before,
+*::after {
+  scrollbar-width: thin;
+  scrollbar-color: var(--text-fainter) var(--bg-surface);
+}
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: var(--bg-surface); }
+*::-webkit-scrollbar-thumb {
+  background: var(--text-fainter);
+  border-radius: 5px;
+  border: 2px solid var(--bg-surface);
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
+*::-webkit-scrollbar-corner { background: var(--bg-surface); }
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-surface:        #0f172a;
+  --bg-panel:          #1e293b;
+  --bg-elev:           #0a1322;
+  --bg-output:         #0a1f0a;
+  --bg-error:          #1a0a0a;
+
+  --border:            #334155;
+  --border-output:     #166534;
+  --border-error:      #7f1d1d;
+
+  --button-bg:         #334155;
+  --button-bg-hover:   #475569;
+  --button-bg-disabled:#1e293b;
+  --button-text:       #ffffff;
+
+  --text:              #e2e8f0;
+  --text-muted:        #94a3b8;
+  --text-faint:        #64748b;
+  --text-fainter:      #475569;
+  --text-code:         #cbd5e1;
+  --text-error:        #fca5a5;
+  --text-output:       #86efac;
+  --text-output-label: #4ade80;
+
+  --accent:            #7c3aed;
+  --accent-soft:       #a78bfa;
+
+  --json-key:          #c4b5fd;
+  --json-string:       #86efac;
+  --json-number:       #fbbf24;
+  --json-bool:         #67e8f9;
+  --json-null:         #94a3b8;
+  --json-punct:        #cbd5e1;
+  --json-comma:        #64748b;
+
+  --frame-key:         #a78bfa;
+  --frame-value:       #fbbf24;
+
+  --arrow-green:       #22c55e;
+  --arrow-red:         #ef4444;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg-surface:        #ffffff;
+  --bg-panel:          #f1f5f9;
+  --bg-elev:           #e2e8f0;
+  --bg-output:         #ecfdf5;
+  --bg-error:          #fef2f2;
+
+  --border:            #cbd5e1;
+  --border-output:     #86efac;
+  --border-error:      #fecaca;
+
+  --button-bg:         #e2e8f0;
+  --button-bg-hover:   #cbd5e1;
+  --button-bg-disabled:#f1f5f9;
+  --button-text:       #0f172a;
+
+  --text:              #0f172a;
+  --text-muted:        #475569;
+  --text-faint:        #64748b;
+  --text-fainter:      #94a3b8;
+  --text-code:         #334155;
+  --text-error:        #b91c1c;
+  --text-output:       #166534;
+  --text-output-label: #15803d;
+
+  --accent:            #7c3aed;
+  --accent-soft:       #6d28d9;
+
+  --json-key:          #6d28d9;
+  --json-string:       #166534;
+  --json-number:       #b45309;
+  --json-bool:         #0e7490;
+  --json-null:         #64748b;
+  --json-punct:        #334155;
+  --json-comma:        #94a3b8;
+
+  --frame-key:         #6d28d9;
+  --frame-value:       #b45309;
+
+  --arrow-green:       #16a34a;
+  --arrow-red:         #dc2626;
+}
