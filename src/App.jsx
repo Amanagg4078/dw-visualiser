@@ -1,8 +1,34 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { tokenize, parse, evaluate, formatValue, buildLineSteps, lineIndexForStep } from "./engine";
+import { dwEntries } from "./engine/semantics.js";
 import { SAMPLES, SAMPLES_BY_ID } from "./samples";
 
 const isPrimitive = (v) => v === null || typeof v !== "object";
+
+// JSON serializer that preserves DW's duplicate-key Object semantics —
+// real DW Objects are ordered pair lists, not Maps, so `{a: 1} ++ {a: 2}`
+// renders as `{"a": 1, "a": 2}`. JSON.stringify can't emit duplicate keys
+// (JS objects dedupe), so we render the text by hand using dwEntries,
+// which returns the original ordered pair list when one is attached.
+function dwStringify(value, indent = 2, level = 0) {
+  const pad = (n) => " ".repeat(n * indent);
+  if (value === null || value === undefined) return "null";
+  if (typeof value === "boolean" || typeof value === "number") return String(value);
+  if (typeof value === "string") return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "[]";
+    const inner = value.map((v) => pad(level + 1) + dwStringify(v, indent, level + 1));
+    return `[\n${inner.join(",\n")}\n${pad(level)}]`;
+  }
+  if (typeof value === "object") {
+    if (value.__closure === true) return `"<fn (${(value.params || []).join(", ")})>"`;
+    const entries = dwEntries(value);
+    if (entries.length === 0) return "{}";
+    const inner = entries.map(([k, v]) => `${pad(level + 1)}${JSON.stringify(String(k))}: ${dwStringify(v, indent, level + 1)}`);
+    return `{\n${inner.join(",\n")}\n${pad(level)}}`;
+  }
+  return JSON.stringify(value);
+}
 
 // Categorical badge colours per trace phase. These are intentionally static
 // (not themed) — the phase pill is always white-on-coloured-bg, which reads
@@ -241,13 +267,17 @@ function JsonView({ value, indent = 0 }) {
   }
 
   if (typeof value === "object") {
-    const entries = Object.entries(value);
+    // Use dwEntries — when the object came from `++` merge / object literal
+    // with duplicate keys, this returns the original ordered pair list
+    // (with dupes); otherwise Object.entries. Keys can repeat, so the React
+    // child key uses (k + index) to stay unique.
+    const entries = dwEntries(value);
     if (entries.length === 0) return <span style={{ color: "var(--text-code)" }}>{"{}"}</span>;
     return (
       <>
         <span style={{ color: "var(--text-code)" }}>{"{"}</span>
         {entries.map(([k, v], i) => (
-          <div key={k}>
+          <div key={`${k}-${i}`}>
             {pad(indent + 1)}
             <span style={{ color: "var(--json-key)" }}>{JSON.stringify(k)}</span>
             <span style={{ color: "var(--text-faint)" }}>: </span>
@@ -747,11 +777,29 @@ export default function App() {
           </a>
         )}
         <div style={{ marginLeft: "auto", display: "flex", gap: 14, fontSize: 11, alignItems: "center" }}>
+          {uiMode === "playground" && (
+            <span
+              role="img"
+              aria-label="Playground caveat"
+              title={[
+                "Heads up — this isn't a real DataWeave runtime.",
+                "",
+                "The Playground simulates a slice of DataWeave (lessons 1–8) as a learner tool:",
+                "• No dw::core::Strings / Arrays libraries — only the lesson-covered built-ins.",
+                "• JSON input/output only — no XML / CSV / YAML.",
+                "• Approximation — may diverge from the official engine.",
+              ].join("\n")}
+              style={{
+                color: "var(--arrow-red)",
+                cursor: "help",
+                fontSize: 14,
+                lineHeight: 1,
+                userSelect: "none",
+              }}
+            >⚠️</span>
+          )}
           {compiled.ok && (
-            <>
-              <span style={{ color: "var(--text-muted)" }}>Tokens: <b style={{ color: "var(--accent-soft)" }}>{compiled.tokens.length}</b></span>
-              <span style={{ color: "var(--text-muted)" }}>Events: <b style={{ color: "var(--accent-soft)" }}>{trace.length}</b></span>
-            </>
+            <span style={{ color: "var(--text-muted)" }}>Events: <b style={{ color: "var(--accent-soft)" }}>{trace.length}</b></span>
           )}
           <button
             onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
@@ -1219,7 +1267,7 @@ export default function App() {
                 const useMocked = isLessonView && loadedSample?.mockedOutputs;
                 const copyText = useMocked
                   ? (loadedSample.mockedOutputs[selectedMime] ?? Object.values(loadedSample.mockedOutputs)[0])
-                  : JSON.stringify(compiled.result, null, 2);
+                  : dwStringify(compiled.result);
                 return (
                   <div style={{ background: "var(--bg-output)", borderRadius: 10, padding: 12, border: "1px solid var(--border-output)" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>

@@ -1,4 +1,4 @@
-import { dwApplyBinOp, dwNeg, dwBool, dwNot, dwEq } from "./semantics.js";
+import { dwApplyBinOp, dwNeg, dwBool, dwNot, dwEq, dwObjectFromEntries } from "./semantics.js";
 import { BUILTINS } from "./stdlib/index.js";
 
 // Recursively remove every key whose value is null (and every null element
@@ -539,16 +539,22 @@ export function evaluate(script, payload) {
       return result;
     }
     if (node.kind === "ObjectLit") {
-      const obj = {};
+      // Build via an ordered pair list so duplicate keys are preserved.
+      // dwObjectFromEntries returns a plain JS object for the dedup view
+      // and attaches the pair list under DW_PAIRS only when duplicates
+      // exist — keeping single-key objects indistinguishable from a JS
+      // literal for the rest of the engine.
+      const entries = [];
       emit({ phase: "object-start", description: `Begin building object`, line: node.line, expr: exprToStr(node) });
       for (const f of node.fields) {
         // Dynamic key: `(expr): value`. Evaluate the key expression first
         // and coerce to a string-like key (DW's `Key` type).
         const keyName = f.keyExpr ? String(evalExpr(f.keyExpr)) : f.key;
         const val = evalExpr(f.value);
-        obj[keyName] = val;
+        entries.push([keyName, val]);
         emit({ phase: "object-field", description: `Set field "${keyName}" = ${formatValue(val)}`, line: f.line ?? node.line, expr: `${keyName}: ${exprToStr(f.value)}`, value: val });
       }
+      const obj = dwObjectFromEntries(entries);
       emit({ phase: "object-done", description: `Object complete`, line: node.line, expr: exprToStr(node), value: obj });
       return obj;
     }

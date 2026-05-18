@@ -4,6 +4,7 @@ import {
   dwEq, dwNeq, dwLt, dwGt, dwNeg,
   dwBool, dwNot,
   dwApplyBinOp,
+  dwEntries, dwObjectFromEntries,
 } from "./semantics.js";
 
 describe("semantics (Phase 1 behaviour locked in)", () => {
@@ -62,6 +63,31 @@ describe("semantics (Phase 1 behaviour locked in)", () => {
     expect(dwNot(false)).toBe(true);
     expect(dwNot(null)).toBe(true);
     expect(dwNot("x")).toBe(false);
+  });
+
+  test("dwConcat on objects preserves duplicate keys (DW Object semantics)", () => {
+    const result = dwConcat({ a: 1, b: 2 }, { a: 3, b: 4 });
+    // The dedup view sees the last value for each key (so existing
+    // selector/stdlib paths keep working).
+    expect(result).toEqual({ a: 3, b: 4 });
+    // But the ordered pair list with duplicates is attached for the JSON
+    // output serializer to use.
+    expect(dwEntries(result)).toEqual([["a", 1], ["b", 2], ["a", 3], ["b", 4]]);
+  });
+
+  test("dwConcat on objects with no overlap returns a plain object (no DW_PAIRS overhead)", () => {
+    const result = dwConcat({ a: 1 }, { b: 2 });
+    expect(result).toEqual({ a: 1, b: 2 });
+    // Same shape as Object.entries — no Symbol attached.
+    expect(dwEntries(result)).toEqual([["a", 1], ["b", 2]]);
+  });
+
+  test("dwObjectFromEntries attaches DW_PAIRS only when duplicates exist", () => {
+    const noDup = dwObjectFromEntries([["a", 1], ["b", 2]]);
+    expect(dwEntries(noDup)).toEqual([["a", 1], ["b", 2]]);
+    const withDup = dwObjectFromEntries([["a", 1], ["a", 2]]);
+    expect(dwEntries(withDup)).toEqual([["a", 1], ["a", 2]]);
+    expect(withDup).toEqual({ a: 2 });  // dedup view, last wins
   });
 
   // Documented JS-isms that real DataWeave handles differently.

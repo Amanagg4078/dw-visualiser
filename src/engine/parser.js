@@ -277,7 +277,7 @@ export function parse(tokens) {
   // Without these exclusions they'd parse as `to(0, 2)` / `update(payload, …)`
   // / `default(x, y)` function calls and the real syntax would break.
   function parseInfix() {
-    let left = parseDefault();
+    let left = parseRange();
     while (
       peek().type === TOK.IDENT &&
       peek().value !== "to" &&
@@ -285,7 +285,7 @@ export function parse(tokens) {
       peek().value !== "default"
     ) {
       const fnTok = tokens[p++];
-      const right = parseDefault();
+      const right = parseRange();
       const callee = { kind: "Ident", name: fnTok.value, line: fnTok.line };
       left = {
         kind: "Call",
@@ -293,6 +293,20 @@ export function parse(tokens) {
         args: wrapDollarArgs(callee, [left, right]),
         line: left.line ?? fnTok.line,
       };
+    }
+    return left;
+  }
+  // `n to m` — standalone range literal at a precedence rung BELOW infix
+  // calls but ABOVE the default/logical/comparison rungs. That ordering
+  // makes `0 to item reduce f` parse as `(0 to item) reduce f` (matching
+  // real DW), and `0 + 1 to 5 + 1` as `(0+1) to (5+1)`. Non-loop: chained
+  // `0 to 5 to 10` is not meaningful, so we only allow a single `to`.
+  function parseRange() {
+    const left = parseDefault();
+    if (peek().type === TOK.IDENT && peek().value === "to") {
+      const tok = tokens[p++];
+      const right = parseDefault();
+      return { kind: "RangeLit", start: left, end: right, line: left.line ?? tok.line };
     }
     return left;
   }
@@ -429,19 +443,20 @@ export function parse(tokens) {
         p++;
         node = { kind: "DescendantsSelector", object: node, field, line: node.line };
       } else if (t0.type === TOK.LBRACK) {
-        // `[ expr ]` for IndexSelector, or `[ expr 'to' expr ]` for RangeSelector.
-        // `to` is a *contextual* keyword — only special inside the brackets,
-        // so `var to = 5` still works elsewhere.
+        // `[ expr ]` for IndexSelector, or `[ expr 'to' expr ]` for
+        // RangeSelector. Because `to` is now a general operator (parseRange),
+        // the inner expression may *already* have parsed `n to m` as a
+        // RangeLit — in that case it's really a slice, so unwrap into a
+        // RangeSelector. The legacy explicit form (where parseExpr returned
+        // the start expression and `to` was still pending) was equivalent;
+        // this branch just reflects where the `to` parsing now lives.
         eat(TOK.LBRACK);
-        const startExpr = parseExpr();
-        if (peek().type === TOK.IDENT && peek().value === "to") {
-          p++;
-          const endExpr = parseExpr();
-          eat(TOK.RBRACK);
-          node = { kind: "RangeSelector", object: node, start: startExpr, end: endExpr, line: node.line };
+        const inner = parseExpr();
+        eat(TOK.RBRACK);
+        if (inner.kind === "RangeLit") {
+          node = { kind: "RangeSelector", object: node, start: inner.start, end: inner.end, line: node.line };
         } else {
-          eat(TOK.RBRACK);
-          node = { kind: "IndexSelector", object: node, index: startExpr, line: node.line };
+          node = { kind: "IndexSelector", object: node, index: inner, line: node.line };
         }
       } else {
         // Function call: `callee(arg, arg, ...)`. LPAREN was already checked
@@ -545,18 +560,7 @@ export function parse(tokens) {
       // A lambda's params are 0+ comma-separated IDENTs followed by `)` then `->`.
       const lambda = tryParseLambda();
       if (lambda) return lambda;
-      const openTok = tokens[p++];
-      const e = parseExpr();
-      // `(expr to expr)` standalone range literal — produces an inclusive
-      // array of numbers. `to` is contextual here just like inside `[…]`.
-      if (peek().type === TOK.IDENT && peek().value === "to") {
-        p++;
-        const endExpr = parseExpr();
-        eat(TOK.RPAREN);
-        return { kind: "RangeLit", start: e, end: endExpr, line: openTok.line };
-      }
-      eat(TOK.RPAREN);
-      return e;
+      p++; const e = parseExpr(); eat(TOK.RPAREN); return e;
     }
     if (t.type === TOK.LBRACE) return parseObject();
     if (t.type === TOK.LBRACK) return parseArray();
@@ -586,7 +590,13 @@ export function parse(tokens) {
       eat(TOK.COLON);
       const value = parseExpr();
       fields.push({ key, keyExpr, value, line: keyLine });
+      // Real DW requires `,` between fields. After a field, allow either a
+      // trailing `}` or a separating `,`. A trailing `,` before `}` is fine.
       if (peek().type === TOK.COMMA) p++;
+      else if (peek().type !== TOK.RBRACE) {
+        const t2 = peek();
+        throw new Error(`Expected \`,\` or \`}\` after object field, got ${t2.type} (${t2.value}) at line ${t2.line}:${t2.col}`);
+      }
     }
     eat(TOK.RBRACE);
     return { kind: "ObjectLit", fields, line: tok.line };
@@ -598,7 +608,12 @@ export function parse(tokens) {
       const itemLine = peek().line;
       const value = parseExpr();
       items.push({ value, line: itemLine });
+      // Real DW requires `,` between items. Trailing `,` before `]` is fine.
       if (peek().type === TOK.COMMA) p++;
+      else if (peek().type !== TOK.RBRACK) {
+        const t2 = peek();
+        throw new Error(`Expected \`,\` or \`]\` after array item, got ${t2.type} (${t2.value}) at line ${t2.line}:${t2.col}`);
+      }
     }
     eat(TOK.RBRACK);
     return { kind: "ArrayLit", items, line: tok.line };

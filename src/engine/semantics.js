@@ -8,6 +8,47 @@
 // Rule: evaluator.js MUST go through these wrappers — never use raw JS
 // operators directly. That is the whole point of this module.
 
+// Real DataWeave Objects are *ordered* key/value lists that ALLOW
+// duplicate keys (e.g. `{a: 1, a: 2} ++ {a: 3}` is `{a: 1, a: 2, a: 3}`,
+// not `{a: 3}`). JS objects can't natively have duplicates, so we keep
+// the deduplicated "last wins" view as the live JS object AND, when
+// duplicates exist, attach the original ordered pair list under this
+// Symbol. Downstream serialisation (JSON output, JsonView) reads the
+// pair list so the user sees the real DW output verbatim.
+//
+// Note: `.field` selectors still resolve against the deduplicated view
+// (so they return the last value, not the first). That's a documented
+// divergence from real DW — fixing it requires updating every code path
+// that touches objects, which we'll do incrementally.
+export const DW_PAIRS = Symbol("__dwPairs");
+
+// Return the ordered (k, v) pairs for a DW object. Uses the attached
+// DW_PAIRS list if present (preserves duplicates), else falls back to
+// Object.entries (no duplicates).
+export function dwEntries(obj) {
+  if (obj == null || typeof obj !== "object" || Array.isArray(obj)) return [];
+  return obj[DW_PAIRS] ?? Object.entries(obj);
+}
+
+// Build a "DW object" from an ordered pair list. Returns a plain JS
+// object (last value wins for the live view) with the original pair list
+// attached as DW_PAIRS *only if* duplicates exist — otherwise it's an
+// ordinary object indistinguishable from a JS literal.
+export function dwObjectFromEntries(entries) {
+  const out = {};
+  const seen = new Set();
+  let hasDup = false;
+  for (const [k, v] of entries) {
+    if (seen.has(k)) hasDup = true;
+    else seen.add(k);
+    out[k] = v;
+  }
+  if (hasDup) {
+    Object.defineProperty(out, DW_PAIRS, { value: entries, enumerable: false });
+  }
+  return out;
+}
+
 // DW: "5" + 5 is a type error (operands must match). JS coerces to "55".
 export const dwAdd = (l, r) => l + r;
 
@@ -20,7 +61,8 @@ export const dwDiv = (l, r) => l / r;
 
 // DW concat operator. Overloaded:
 //  - String + anything  → string concat (with stringification)
-//  - Object + Object    → shallow merge (right wins on duplicate keys)
+//  - Object + Object    → ordered append; DUPLICATE KEYS ARE PRESERVED
+//                         (real DW Objects are ordered pair lists, not Maps)
 //  - Array  + Array     → concatenation
 // For mixed types we fall back to the string form (matches what real DW
 // does when one side is a String).
@@ -28,22 +70,23 @@ export const dwConcat = (l, r) => {
   if (Array.isArray(l) && Array.isArray(r)) return [...l, ...r];
   const lIsObj = l && typeof l === "object" && !Array.isArray(l) && l.__closure !== true;
   const rIsObj = r && typeof r === "object" && !Array.isArray(r) && r.__closure !== true;
-  if (lIsObj && rIsObj) return { ...l, ...r };
+  if (lIsObj && rIsObj) {
+    return dwObjectFromEntries([...dwEntries(l), ...dwEntries(r)]);
+  }
   return String(l) + String(r);
 };
 
 // DW Object minus — real DW only supports `Object - String` (drop one key)
 // or `Object - Name` (a single key reference). Array/Object RHS forms are
 // rejected by the real runtime, so we reject them too. Returns a *new*
-// object (input not mutated).
+// object (input not mutated). Operates on the ordered pair list, so it
+// drops *every* duplicate of the named key (matches real DW).
 export const dwObjectMinus = (l, r) => {
   if (l == null || typeof l !== "object" || Array.isArray(l)) return l;
   if (typeof r !== "string") {
     throw new Error(`Object '-' expects a String key on the right, got ${typeof r}`);
   }
-  const out = {};
-  for (const [k, v] of Object.entries(l)) if (k !== r) out[k] = v;
-  return out;
+  return dwObjectFromEntries(dwEntries(l).filter(([k]) => k !== r));
 };
 
 // DW equality is strict and typed; JS === matches for primitives but

@@ -8,6 +8,7 @@
 // Exits non-zero if any case diverges.
 
 import { run } from "../src/engine/index.js";
+import { dwEntries } from "../src/engine/semantics.js";
 
 const DW_URL = "https://dataweave.mulesoft.com/transform";
 
@@ -32,8 +33,32 @@ async function callRealDW(script, payload) {
   });
   const json = await res.json();
   if (!json.success) throw new Error("DW compile/runtime error: " + (json.error?.message || JSON.stringify(json.error)));
-  return JSON.parse(json.result.content);
+  return json.result.content;  // raw text — caller decides whether to parse
 }
+
+// JSON serializer that preserves DW's duplicate-key Object semantics — see
+// the matching helper in App.jsx. Tests with `compareAsText: true` compare
+// these raw strings so duplicate keys aren't lost to JSON.parse dedupe.
+function dwStringify(value, indent = 2, level = 0) {
+  const pad = (n) => " ".repeat(n * indent);
+  if (value === null || value === undefined) return "null";
+  if (typeof value === "boolean" || typeof value === "number") return String(value);
+  if (typeof value === "string") return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "[]";
+    return `[\n${value.map((v) => pad(level + 1) + dwStringify(v, indent, level + 1)).join(",\n")}\n${pad(level)}]`;
+  }
+  if (typeof value === "object") {
+    const entries = dwEntries(value);
+    if (entries.length === 0) return "{}";
+    return `{\n${entries.map(([k, v]) => `${pad(level + 1)}${JSON.stringify(String(k))}: ${dwStringify(v, indent, level + 1)}`).join(",\n")}\n${pad(level)}}`;
+  }
+  return JSON.stringify(value);
+}
+
+// Normalise whitespace between formatters so DW's indented JSON output
+// can be compared with our serializer's output on equal footing.
+const normalize = (s) => s.replace(/\s+/g, " ").trim();
 
 // Each case: a script + payload + a short description of which features it
 // exercises. We compare deep-equal on the parsed JSON output.
@@ -580,6 +605,19 @@ var desc = (5 to 1)
 }`,
     payload: { lo: 2, hi: 4 },
   },
+  {
+    // Triangle of asterisks — exercises (a) `to` binding tighter than infix
+    // calls, so `(0 to item reduce f)` is `(0 to item) reduce f`, and (b)
+    // the `\n` escape sequence in string literals.
+    name: "range + infix precedence + `\\n` escape (asterisk triangle)",
+    script: `%dw 2.0
+var n = 5
+output application/json
+---
+(0 to n-1) reduce ((item, acc = "") -> acc ++
+  (0 to item reduce ((i, a = "") -> a ++ "*")) ++ "\\n")`,
+    payload: {},
+  },
 
   // ─── Stdlib v1 — operators (~= and default) ────────────────────────────
   {
@@ -623,6 +661,35 @@ output application/json skipNullOn = "everywhere"
   nested:  { a: 1, b: null, c: { x: null, y: 2 } }
 }`,
     payload: {},
+  },
+
+  // ─── Object duplicate-key preservation (DW Objects are ordered pair lists) ─
+  {
+    name: "++ merge preserves duplicate keys (DW Objects are ordered pair lists)",
+    script: `%dw 2.0
+output application/json
+---
+{ a: 1, b: "x" } ++ { a: 2, b: "y" }`,
+    payload: {},
+    compareAsText: true,
+  },
+  {
+    name: "object literal preserves duplicate keys",
+    script: `%dw 2.0
+output application/json
+---
+{ a: 1, a: 2, a: 3 }`,
+    payload: {},
+    compareAsText: true,
+  },
+  {
+    name: "object `-` drops every duplicate of the named key",
+    script: `%dw 2.0
+output application/json
+---
+({ a: 1, a: 2, b: 3 }) - "a"`,
+    payload: {},
+    compareAsText: true,
   },
 
   // ─── Composite — stdlib + existing engine features ─────────────────────
@@ -671,7 +738,16 @@ for (const c of CASES) {
   let ours, theirs, oursErr, theirsErr;
   try { ours = run(c.script, payload).result; } catch (e) { oursErr = e.message; }
   try { theirs = await callRealDW(c.script, payload); } catch (e) { theirsErr = e.message; }
-  const ok = !oursErr && !theirsErr && deepEq(ours, theirs);
+  let ok;
+  if (c.compareAsText) {
+    // Tests that hinge on JSON output that JS objects can't represent
+    // (e.g. duplicate-key objects) compare the rendered text directly.
+    ok = !oursErr && !theirsErr && normalize(dwStringify(ours)) === normalize(theirs);
+  } else {
+    const theirsParsed = theirsErr ? undefined : JSON.parse(theirs);
+    ok = !oursErr && !theirsErr && deepEq(ours, theirsParsed);
+    if (!ok && !theirsErr) theirs = JSON.stringify(theirsParsed);
+  }
   if (ok) {
     pass++;
     console.log(`PASS  ${c.name}`);
@@ -679,9 +755,9 @@ for (const c of CASES) {
     fail++;
     console.log(`FAIL  ${c.name}`);
     if (oursErr) console.log(`  ours error:   ${oursErr}`);
-    else         console.log(`  ours:    ${JSON.stringify(ours)}`);
+    else         console.log(`  ours:    ${c.compareAsText ? dwStringify(ours) : JSON.stringify(ours)}`);
     if (theirsErr) console.log(`  theirs error: ${theirsErr}`);
-    else           console.log(`  theirs:  ${JSON.stringify(theirs)}`);
+    else           console.log(`  theirs:  ${theirs}`);
   }
 }
 

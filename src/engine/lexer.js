@@ -71,8 +71,25 @@ export function tokenize(src) {
     if (c === '"') {
       advance(); let v = "";
       while (i < src.length && peek() !== '"') {
-        if (peek() === "\\") { advance(); v += advance(); }
-        else v += advance();
+        if (peek() === "\\") {
+          // Escape sequence — match real DW: `\n`/`\t`/`\r` are control
+          // characters, `\\` is a literal backslash, `\"` is a quote.
+          // Unknown escapes pass the literal following character through.
+          advance();
+          const esc = advance();
+          switch (esc) {
+            case "n":  v += "\n"; break;
+            case "t":  v += "\t"; break;
+            case "r":  v += "\r"; break;
+            case "\\": v += "\\"; break;
+            case '"':  v += '"';  break;
+            case "'":  v += "'";  break;
+            case "0":  v += "\0"; break;
+            default:   v += esc;
+          }
+        } else {
+          v += advance();
+        }
       }
       advance();
       push(TOK.STR, v, startLine, startCol);

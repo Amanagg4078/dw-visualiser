@@ -108,6 +108,20 @@ describe("parser", () => {
     expect(ast.body.end.kind).toBe("Selector");
   });
 
+  test("object literal requires `,` between fields (matches real DW)", () => {
+    expect(() => parseSrc(`---\n{ "a": 1\n "b": 2 }`)).toThrow(/Expected `,`/);
+  });
+
+  test("object literal allows trailing comma before `}`", () => {
+    const ast = parseSrc(`---\n{ "a": 1, "b": 2, }`);
+    expect(ast.body.kind).toBe("ObjectLit");
+    expect(ast.body.fields).toHaveLength(2);
+  });
+
+  test("array literal requires `,` between items (matches real DW)", () => {
+    expect(() => parseSrc(`---\n[1 2 3]`)).toThrow(/Expected `,`/);
+  });
+
   test("parses multi-value selector `.*field`", () => {
     const ast = parseSrc(`---\npayload.*name`);
     expect(ast.body.kind).toBe("MultiValueSelector");
